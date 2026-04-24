@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-sync-external-from-me';
+const VERSION = 'bridge-2026-04-24-automation-debug';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -131,6 +131,42 @@ function isOutgoingMessage(payload) {
   if (senderType.includes('agent') || senderType.includes('bot')) return true;
 
   return false;
+}
+
+function incomingEventName(payload) {
+  if (typeof payload?.event === 'string') return payload.event;
+  return String(firstPath(payload, [
+    'event.Event',
+    'event.event',
+    'data.Event',
+    'data.event',
+    'Data.Event',
+    'Data.event',
+    'Event',
+    'eventType',
+    'type'
+  ]) || '');
+}
+
+function incomingMessageObject(payload) {
+  return firstPath(payload, [
+    'event.Message',
+    'event.AutomationMessage',
+    'event.message',
+    'event.automationMessage',
+    'data.Message',
+    'data.AutomationMessage',
+    'data.message',
+    'data.automationMessage',
+    'Data.Message',
+    'Data.AutomationMessage',
+    'Data.message',
+    'Data.automationMessage',
+    'Message',
+    'AutomationMessage',
+    'message',
+    'automationMessage'
+  ]);
 }
 
 function isBridgeSyncedOutgoing(payload) {
@@ -447,6 +483,7 @@ async function reverseLid(channelKey, lid) {
 }
 
 async function parseIncoming(payload, channelKey) {
+  const eventName = incomingEventName(payload);
   const fromMe = Boolean(firstPath(payload, [
     'event.Info.IsFromMe',
     'data.Info.IsFromMe',
@@ -464,6 +501,15 @@ async function parseIncoming(payload, channelKey) {
     'data.Info.Chat',
     'Data.Info.Chat',
     'Info.Chat',
+    'event.Info.Recipient',
+    'event.Info.Receiver',
+    'event.Info.To',
+    'data.Info.Recipient',
+    'data.Info.Receiver',
+    'data.Info.To',
+    'Data.Info.Recipient',
+    'Data.Info.Receiver',
+    'Data.Info.To',
     'data.key.remoteJid',
     'key.remoteJid',
     'remoteJid',
@@ -532,6 +578,8 @@ async function parseIncoming(payload, channelKey) {
   if (!phone) {
     log('warn', 'no_phone debug', {
       channelKey,
+      eventName,
+      fromMe,
       chatJid: chatJidText,
       senderJid: normalizeJidValue(rawSenderJid),
       phoneAltJid: normalizeJidValue(phoneAltJid),
@@ -540,18 +588,25 @@ async function parseIncoming(payload, channelKey) {
     return { ignore: true, reason: 'no_phone' };
   }
 
-  const eventMessage = firstPath(payload, ['event.Message', 'event.message']);
-  const dataMessage = firstPath(payload, ['data.Message', 'Data.Message', 'Message']);
-  const rawText = extractMessageText(eventMessage) || extractMessageText(dataMessage) || firstPath(payload, [
+  const messageObject = incomingMessageObject(payload);
+  const rawText = extractMessageText(messageObject) || firstPath(payload, [
     'event.Message.conversation',
+    'event.AutomationMessage.conversation',
     'event.Message.extendedTextMessage.text',
+    'event.AutomationMessage.extendedTextMessage.text',
     'event.body',
     'data.Message.conversation',
+    'data.AutomationMessage.conversation',
     'Data.Message.conversation',
+    'Data.AutomationMessage.conversation',
     'Message.conversation',
+    'AutomationMessage.conversation',
     'data.Message.extendedTextMessage.text',
+    'data.AutomationMessage.extendedTextMessage.text',
     'Data.Message.extendedTextMessage.text',
+    'Data.AutomationMessage.extendedTextMessage.text',
     'Message.extendedTextMessage.text',
+    'AutomationMessage.extendedTextMessage.text',
     'data.body',
     'body',
     'text',
@@ -561,16 +616,27 @@ async function parseIncoming(payload, channelKey) {
   const text = rawText && typeof rawText === 'object' ? extractMessageText(rawText) : rawText;
 
   const mediaUrl = extractMediaUrl(payload);
-  const mediaKind = mediaUrl ? incomingMediaKind(eventMessage || dataMessage, payload) : '';
-  const location = incomingLocationDetails(eventMessage || dataMessage);
-  const locationText = incomingLocationText(eventMessage || dataMessage);
-  const contactText = incomingContactText(eventMessage || dataMessage);
+  const mediaKind = mediaUrl ? incomingMediaKind(messageObject, payload) : '';
+  const location = incomingLocationDetails(messageObject);
+  const locationText = incomingLocationText(messageObject);
+  const contactText = incomingContactText(messageObject);
 
   let content = String(text || '').trim();
   if (!content && locationText) content = locationText;
   if (!content && contactText) content = contactText;
   if (!content && mediaUrl) content = `[${mediaKind} recebida]`;
-  if (!content) return { ignore: true, reason: 'no_content' };
+  if (!content) {
+    return {
+      ignore: true,
+      reason: 'no_content',
+      debug: {
+        eventName,
+        fromMe,
+        echoCandidate: firstPath(payload, ['event.Info.ID', 'data.Info.ID', 'Data.Info.ID', 'Info.ID', 'id']),
+        payloadSnippet: summarizePayload(payload)
+      }
+    };
+  }
 
   const pushName = firstPath(payload, [
     'event.Info.PushName',
@@ -596,7 +662,7 @@ async function parseIncoming(payload, channelKey) {
   ]) || `${channelKey}-${Date.now()}`);
 
   if (fromMe && isBridgeOutboundId(echoId)) {
-    return { ignore: true, reason: 'from_me_bridge_echo' };
+    return { ignore: true, reason: 'from_me_bridge_echo', debug: { eventName, echoId } };
   }
 
   return {
@@ -605,6 +671,7 @@ async function parseIncoming(payload, channelKey) {
     name: String(pushName),
     content,
     fromMe,
+    eventName,
     messageType: fromMe ? 'outgoing' : 'incoming',
     mediaUrl,
     mediaKind,
@@ -1195,7 +1262,7 @@ async function handleIncoming(req, res, channelKey) {
   const payload = await readBody(req);
   const msg = await parseIncoming(payload, channelKey);
   if (msg.ignore) {
-    log('info', 'incoming ignored', { channelKey, reason: msg.reason });
+    log('info', 'incoming ignored', { channelKey, reason: msg.reason, ...(msg.debug || {}) });
     return sendJson(res, 200, { ok: true, ignored: msg.reason });
   }
   const dedupe = markIncomingMessage(msg);
@@ -1209,7 +1276,16 @@ async function handleIncoming(req, res, channelKey) {
     const contactCtx = await ensureContact(msg, inboxId);
     const conversationId = await getOrCreateConversation(msg, contactCtx, inboxId);
     await addIncomingMessage(msg, conversationId);
-    log('info', 'incoming synced', { channelKey, phone: msg.phone, conversationId, contactId: contactCtx.contactId, media: Boolean(msg.mediaUrl) });
+    log('info', 'incoming synced', {
+      channelKey,
+      phone: msg.phone,
+      conversationId,
+      contactId: contactCtx.contactId,
+      media: Boolean(msg.mediaUrl),
+      fromMe: Boolean(msg.fromMe),
+      eventName: msg.eventName,
+      messageType: msg.messageType
+    });
     sendJson(res, 200, { ok: true, conversationId });
   } catch (err) {
     if (dedupe.key) recentIncomingMessages.delete(dedupe.key);

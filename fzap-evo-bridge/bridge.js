@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-incoming-media-dedupe';
+const VERSION = 'bridge-2026-04-24-location-preview';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -364,13 +364,27 @@ function incomingMediaFileName(payload, mediaUrl, mediaKind, mimeType = '') {
 }
 
 function incomingLocationText(message) {
+  const location = incomingLocationDetails(message);
+  if (!location) return '';
+  return [`[localizacao recebida]`, location.name, location.address, location.url].filter(Boolean).join('\n');
+}
+
+function incomingLocationDetails(message) {
   const latitude = firstPath(message, ['locationMessage.degreesLatitude', 'liveLocationMessage.degreesLatitude']);
   const longitude = firstPath(message, ['locationMessage.degreesLongitude', 'liveLocationMessage.degreesLongitude']);
-  if (latitude === undefined || longitude === undefined) return '';
+  if (latitude === undefined || longitude === undefined) return null;
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   const name = firstPath(message, ['locationMessage.name', 'liveLocationMessage.name']);
   const address = firstPath(message, ['locationMessage.address', 'liveLocationMessage.address']);
-  const maps = `https://maps.google.com/?q=${latitude},${longitude}`;
-  return [`[localizacao recebida]`, name, address, maps].filter(Boolean).join('\n');
+  return {
+    latitude: lat,
+    longitude: lng,
+    name,
+    address,
+    url: `https://maps.google.com/?q=${lat},${lng}`
+  };
 }
 
 function incomingContactText(message) {
@@ -519,6 +533,7 @@ async function parseIncoming(payload, channelKey) {
 
   const mediaUrl = extractMediaUrl(payload);
   const mediaKind = mediaUrl ? incomingMediaKind(eventMessage || dataMessage, payload) : '';
+  const location = incomingLocationDetails(eventMessage || dataMessage);
   const locationText = incomingLocationText(eventMessage || dataMessage);
   const contactText = incomingContactText(eventMessage || dataMessage);
 
@@ -559,6 +574,7 @@ async function parseIncoming(payload, channelKey) {
     mediaUrl,
     mediaKind,
     mediaFileName: mediaUrl ? incomingMediaFileName(payload, mediaUrl, mediaKind) : '',
+    location,
     echoId,
     channelKey,
     channelLabel: channel.label || channelKey
@@ -771,6 +787,20 @@ async function getOrCreateConversation(msg, ctx, inboxId) {
 }
 
 async function addIncomingMessage(msg, conversationId) {
+  if (msg.location) {
+    try {
+      return await addIncomingLocationMessage(msg, conversationId);
+    } catch (err) {
+      log('warn', 'incoming location preview failed, falling back to text', {
+        conversationId,
+        echoId: msg.echoId,
+        status: err.status,
+        body: err.body,
+        error: err.message
+      });
+    }
+  }
+
   if (msg.mediaUrl) {
     try {
       return await addIncomingMediaMessage(msg, conversationId);
@@ -797,6 +827,97 @@ async function addIncomingMessage(msg, conversationId) {
     }))
   });
   log('info', 'message created', { conversationId, messageId: result?.id });
+  return result;
+}
+
+function lonToTileX(lon, zoom) {
+  return Math.floor(((lon + 180) / 360) * 2 ** zoom);
+}
+
+function latToTileY(lat, zoom) {
+  const rad = lat * Math.PI / 180;
+  return Math.floor((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * 2 ** zoom);
+}
+
+function lonToPixelX(lon, zoom) {
+  return ((lon + 180) / 360) * 2 ** zoom * 256;
+}
+
+function latToPixelY(lat, zoom) {
+  const rad = lat * Math.PI / 180;
+  return (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * 2 ** zoom * 256;
+}
+
+async function fetchTileDataUrl(x, y, zoom) {
+  const response = await fetch(`https://tile.openstreetmap.org/${zoom}/${x}/${y}.png`, {
+    headers: {
+      'user-agent': 'Chat CRM Senhor Colchao FZAP Bridge/1.0'
+    }
+  });
+  if (!response.ok) throw new Error(`tile download ${response.status}`);
+  const bytes = await response.arrayBuffer();
+  return `data:image/png;base64,${Buffer.from(bytes).toString('base64')}`;
+}
+
+async function buildLocationMapSvg(location) {
+  const zoom = 16;
+  const centerX = lonToTileX(location.longitude, zoom);
+  const centerY = latToTileY(location.latitude, zoom);
+  const originTileX = centerX - 1;
+  const originTileY = centerY - 1;
+  const originPixelX = originTileX * 256;
+  const originPixelY = originTileY * 256;
+  const markerX = lonToPixelX(location.longitude, zoom) - originPixelX;
+  const markerY = latToPixelY(location.latitude, zoom) - originPixelY;
+  const tiles = [];
+
+  for (let dy = 0; dy < 3; dy += 1) {
+    for (let dx = 0; dx < 3; dx += 1) {
+      try {
+        const href = await fetchTileDataUrl(originTileX + dx, originTileY + dy, zoom);
+        tiles.push(`<image href="${href}" x="${dx * 256}" y="${dy * 256}" width="256" height="256"/>`);
+      } catch (err) {
+        log('warn', 'map tile failed', { x: originTileX + dx, y: originTileY + dy, zoom, error: err.message });
+        tiles.push(`<rect x="${dx * 256}" y="${dy * 256}" width="256" height="256" fill="#e5e7eb"/>`);
+      }
+    }
+  }
+
+  const label = decodeHtmlEntities(location.name || location.address || 'Localizacao recebida')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="768" height="840" viewBox="0 0 768 840">
+  <rect width="768" height="840" fill="#f8fafc"/>
+  <g>${tiles.join('')}</g>
+  <g transform="translate(${markerX.toFixed(2)} ${markerY.toFixed(2)})">
+    <path d="M0 30 C-32 -12 -18 -48 0 -48 C18 -48 32 -12 0 30Z" fill="#ef4444" stroke="#991b1b" stroke-width="4"/>
+    <circle cx="0" cy="-22" r="12" fill="#fff"/>
+  </g>
+  <rect x="0" y="768" width="768" height="72" fill="#ffffff"/>
+  <text x="24" y="800" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#111827">${label}</text>
+  <text x="24" y="828" font-family="Arial, sans-serif" font-size="18" fill="#4b5563">${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)} - OpenStreetMap contributors</text>
+</svg>`;
+}
+
+async function addIncomingLocationMessage(msg, conversationId) {
+  const svg = await buildLocationMapSvg(msg.location);
+  const form = new FormData();
+  form.append('content', msg.content);
+  form.append('message_type', 'incoming');
+  form.append('private', 'false');
+  form.append('echo_id', msg.echoId);
+  form.append('attachments[]', new Blob([svg], { type: 'image/svg+xml' }), `localizacao-${msg.echoId || Date.now()}.svg`);
+
+  const result = await evoFetchForm(`/api/v1/conversations/${conversationId}/messages`, form);
+  log('info', 'location message created', {
+    conversationId,
+    messageId: result?.id,
+    latitude: msg.location.latitude,
+    longitude: msg.location.longitude
+  });
   return result;
 }
 

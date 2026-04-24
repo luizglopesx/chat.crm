@@ -103,11 +103,12 @@ Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api-accountl
 - Contato/vCard e localização saindo do EvoCRM para WhatsApp: suportados quando o webhook traz `content_attributes` com `vcard` ou coordenadas.
 - LID da FZAP: tenta campos `SenderPN`/`SenderAlt`/`ChatAlt` antes de cair no reverseLid.
 - Mídia/áudio/documento entrando do WhatsApp para EvoCRM: a bridge tenta baixar a URL da Wuzapi e postar no EvoCRM como `attachments[]`; se falhar, usa fallback classificado com link.
+- Localização entrando do WhatsApp para EvoCRM: a bridge mantém o link do Google Maps no texto e tenta anexar um preview SVG com tiles do OpenStreetMap e marcador.
 
 ## Status e próximos passos
 
 - ✅ Automação commit → deploy (GitHub Actions + GHCR + Portainer webhook)
 - ✅ Contatos e conversas sendo criados no EvoCRM (via Agent API)
-- ⏳ Confirmar anexos entrando e saindo com `bridge-2026-04-24-incoming-media-dedupe`
+- ⏳ Confirmar localização renderizada com `bridge-2026-04-24-location-preview`
 - ⏳ Validar sticker, vCard e localização com payload real
 - ⏳ Conversas antigas vazias no CRM: não preenchem retroativamente; limpar manualmente

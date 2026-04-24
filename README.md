@@ -45,6 +45,7 @@ Opcionais (têm default):
 
 - `EVO_BASE_URL` (default `http://chat_crm_evo_crm:3000`) — aponta direto pro container `evo_crm` da stack `chat_crm`
 - `EVO_PUBLIC_BASE_URL` (default `https://chat.senhorcolchao.com`) — usado para transformar URLs relativas de anexos do EvoCRM em URLs HTTPS públicas para a Wuzapi
+- `BRIDGE_PUBLIC_BASE_URL` (default usa `EVO_PUBLIC_BASE_URL`) — URL pública usada para registrar automaticamente os webhooks da Wuzapi/FZAP
 - `EVO_INBOX_IDENTIFIER` (default `fzap_whatsapp`) — usado pra resolver o `inbox_id` numérico no startup
 - `EVO_INBOX_NAME` (default `FZAP WhatsApp`) — fallback se `EVO_INBOX_IDENTIFIER` não bater
 - `EVO_INBOX_ID` — número; se definido, pula a auto-descoberta
@@ -100,6 +101,7 @@ Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api-accountl
 - Deduplicação de mensagens entrantes: a bridge ignora o mesmo `echo_id`/ID de mensagem da Wuzapi por 10 minutos para evitar duplicidade quando o webhook é reenviado.
 - Automações externas via Wuzapi/FZAP: mensagens `from_me` que não foram enviadas pela própria bridge são sincronizadas no EvoCRM como mensagens de saída, para aparecerem na timeline sem reenviar para o WhatsApp.
 - Eventos `AutomationMessage` da Wuzapi/FZAP: tratados como mensagens normais; quando ignorados, o log inclui `eventName`, `fromMe` e snippet do payload para depuração.
+- Webhooks da Wuzapi/FZAP: no startup, a bridge cria/atualiza seus próprios webhooks `All` e `AutomationMessage` para cada canal configurado, sem apagar webhooks de outros sistemas como o Campaign Manager.
 - Texto sainte (EvoCRM/Agente de IA → WhatsApp): suportado via `/chat/send/text` da Wuzapi; HTML do editor rico é convertido para texto limpo antes do envio.
 - Anexos saindo do EvoCRM para WhatsApp: imagem, áudio, vídeo, documento e sticker são encaminhados para os endpoints específicos da Wuzapi quando o webhook do EvoCRM envia `attachments` com URL pública.
 - Contato/vCard e localização saindo do EvoCRM para WhatsApp: suportados quando o webhook traz `content_attributes` com `vcard` ou coordenadas.

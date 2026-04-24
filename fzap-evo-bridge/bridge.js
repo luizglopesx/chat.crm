@@ -1,10 +1,11 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-automation-debug';
+const VERSION = 'bridge-2026-04-24-automation-webhooks';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
 const EVO_PUBLIC_BASE_URL = (process.env.EVO_PUBLIC_BASE_URL || 'https://chat.senhorcolchao.com').replace(/\/$/, '');
+const BRIDGE_PUBLIC_BASE_URL = (process.env.BRIDGE_PUBLIC_BASE_URL || EVO_PUBLIC_BASE_URL).replace(/\/$/, '');
 const EVO_API_TOKEN = process.env.EVO_API_TOKEN || '';
 const EVO_INBOX_ID_ENV = process.env.EVO_INBOX_ID ? Number(process.env.EVO_INBOX_ID) : 0;
 const EVO_INBOX_IDENTIFIER = process.env.EVO_INBOX_IDENTIFIER || 'fzap_whatsapp';
@@ -486,9 +487,17 @@ async function parseIncoming(payload, channelKey) {
   const eventName = incomingEventName(payload);
   const fromMe = Boolean(firstPath(payload, [
     'event.Info.IsFromMe',
+    'event.Info.MessageSource.IsFromMe',
+    'event.Info.messageSource.isFromMe',
     'data.Info.IsFromMe',
+    'data.Info.MessageSource.IsFromMe',
+    'data.Info.messageSource.isFromMe',
     'Data.Info.IsFromMe',
+    'Data.Info.MessageSource.IsFromMe',
+    'Data.Info.messageSource.isFromMe',
     'Info.IsFromMe',
+    'Info.MessageSource.IsFromMe',
+    'Info.messageSource.isFromMe',
     'event.key.fromMe',
     'data.key.fromMe',
     'key.fromMe',
@@ -498,9 +507,25 @@ async function parseIncoming(payload, channelKey) {
   const rawChatJid = firstPath(payload, [
     'event.Info.Chat',
     'event.Info.Chat.User',
+    'event.Info.MessageSource.Chat',
+    'event.Info.MessageSource.ChatAlt',
+    'event.Info.messageSource.chat',
+    'event.Info.messageSource.chatAlt',
     'data.Info.Chat',
+    'data.Info.MessageSource.Chat',
+    'data.Info.MessageSource.ChatAlt',
+    'data.Info.messageSource.chat',
+    'data.Info.messageSource.chatAlt',
     'Data.Info.Chat',
+    'Data.Info.MessageSource.Chat',
+    'Data.Info.MessageSource.ChatAlt',
+    'Data.Info.messageSource.chat',
+    'Data.Info.messageSource.chatAlt',
     'Info.Chat',
+    'Info.MessageSource.Chat',
+    'Info.MessageSource.ChatAlt',
+    'Info.messageSource.chat',
+    'Info.messageSource.chatAlt',
     'event.Info.Recipient',
     'event.Info.Receiver',
     'event.Info.To',
@@ -520,20 +545,36 @@ async function parseIncoming(payload, channelKey) {
   const chatJidText = normalizeJidValue(rawChatJid);
   if (chatJidText.includes('@g.us')) return { ignore: true, reason: 'group' };
 
-  const phoneAltJid = firstPath(payload, [
+  const senderAltJid = firstPath(payload, [
     'event.Info.SenderPN',
     'event.Info.SenderPn',
     'event.Info.SenderAlt',
     'event.Info.ChatAlt',
+    'event.Info.MessageSource.SenderAlt',
+    'event.Info.MessageSource.ChatAlt',
+    'event.Info.messageSource.senderAlt',
+    'event.Info.messageSource.chatAlt',
     'data.Info.SenderPN',
     'data.Info.SenderAlt',
     'data.Info.ChatAlt',
+    'data.Info.MessageSource.SenderAlt',
+    'data.Info.MessageSource.ChatAlt',
+    'data.Info.messageSource.senderAlt',
+    'data.Info.messageSource.chatAlt',
     'Data.Info.SenderPN',
     'Data.Info.SenderAlt',
     'Data.Info.ChatAlt',
+    'Data.Info.MessageSource.SenderAlt',
+    'Data.Info.MessageSource.ChatAlt',
+    'Data.Info.messageSource.senderAlt',
+    'Data.Info.messageSource.chatAlt',
     'Info.SenderPN',
     'Info.SenderAlt',
     'Info.ChatAlt',
+    'Info.MessageSource.SenderAlt',
+    'Info.MessageSource.ChatAlt',
+    'Info.messageSource.senderAlt',
+    'Info.messageSource.chatAlt',
     'event.key.senderPn',
     'event.key.cleanedSenderPn',
     'data.key.senderPn',
@@ -541,12 +582,55 @@ async function parseIncoming(payload, channelKey) {
     'senderPn'
   ]);
 
+  const recipientAltJid = firstPath(payload, [
+    'event.Info.RecipientAlt',
+    'event.Info.ChatAlt',
+    'event.Info.MessageSource.RecipientAlt',
+    'event.Info.MessageSource.ChatAlt',
+    'event.Info.messageSource.recipientAlt',
+    'event.Info.messageSource.chatAlt',
+    'data.Info.RecipientAlt',
+    'data.Info.ChatAlt',
+    'data.Info.MessageSource.RecipientAlt',
+    'data.Info.MessageSource.ChatAlt',
+    'data.Info.messageSource.recipientAlt',
+    'data.Info.messageSource.chatAlt',
+    'Data.Info.RecipientAlt',
+    'Data.Info.ChatAlt',
+    'Data.Info.MessageSource.RecipientAlt',
+    'Data.Info.MessageSource.ChatAlt',
+    'Data.Info.messageSource.recipientAlt',
+    'Data.Info.messageSource.chatAlt',
+    'Info.RecipientAlt',
+    'Info.ChatAlt',
+    'Info.MessageSource.RecipientAlt',
+    'Info.MessageSource.ChatAlt',
+    'Info.messageSource.recipientAlt',
+    'Info.messageSource.chatAlt'
+  ]);
+
   const rawSenderJid = firstPath(payload, [
     'event.Info.Sender',
     'event.Info.Sender.User',
+    'event.Info.MessageSource.Sender',
+    'event.Info.MessageSource.SenderAlt',
+    'event.Info.messageSource.sender',
+    'event.Info.messageSource.senderAlt',
     'data.Info.Sender',
+    'data.Info.MessageSource.Sender',
+    'data.Info.MessageSource.SenderAlt',
+    'data.Info.messageSource.sender',
+    'data.Info.messageSource.senderAlt',
     'Data.Info.Sender',
+    'Data.Info.MessageSource.Sender',
+    'Data.Info.MessageSource.SenderAlt',
+    'Data.Info.messageSource.sender',
+    'Data.Info.messageSource.senderAlt',
     'Info.Sender',
+    'Info.MessageSource.Sender',
+    'Info.MessageSource.SenderAlt',
+    'Info.messageSource.sender',
+    'Info.messageSource.senderAlt',
     'event.key.remoteJid',
     'data.key.remoteJid',
     'key.remoteJid',
@@ -556,7 +640,10 @@ async function parseIncoming(payload, channelKey) {
     'phone'
   ]) || walkFind(payload, ['remoteJid', 'jid']);
 
-  const candidates = [phoneAltJid, rawChatJid, rawSenderJid].filter(Boolean);
+  const candidates = (fromMe
+    ? [recipientAltJid, rawChatJid, senderAltJid, rawSenderJid]
+    : [senderAltJid, rawChatJid, rawSenderJid]
+  ).filter(Boolean);
   let jidText = '';
   for (const cand of candidates) {
     const text = normalizeJidValue(cand);
@@ -582,7 +669,8 @@ async function parseIncoming(payload, channelKey) {
       fromMe,
       chatJid: chatJidText,
       senderJid: normalizeJidValue(rawSenderJid),
-      phoneAltJid: normalizeJidValue(phoneAltJid),
+      senderAltJid: normalizeJidValue(senderAltJid),
+      recipientAltJid: normalizeJidValue(recipientAltJid),
       payloadSnippet: summarizePayload(payload)
     });
     return { ignore: true, reason: 'no_phone' };
@@ -1097,10 +1185,26 @@ function phoneFromSource(sourceId, sender) {
 }
 
 async function wuzapiFetch(path, channel, body) {
+  return wuzapiRequest(path, channel, { method: 'POST', body });
+}
+
+function wuzapiHeaders(channel, hasBody = false) {
+  const instance = channel.instance || channel.instanceId || channel.wuzapiInstanceId || '';
+  return compactObject({
+    ...(hasBody ? { 'content-type': 'application/json' } : {}),
+    token: channel.token,
+    Token: channel.token,
+    ...(instance ? { instance, Instance: instance } : {})
+  });
+}
+
+async function wuzapiRequest(path, channel, options = {}) {
+  const method = options.method || 'GET';
+  const hasBody = options.body !== undefined;
   const response = await fetch(`${WUZAPI_BASE_URL}${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', token: channel.token },
-    body: JSON.stringify(body)
+    method,
+    headers: wuzapiHeaders(channel, hasBody),
+    ...(hasBody ? { body: JSON.stringify(options.body) } : {})
   });
   const text = await response.text();
   let parsed;
@@ -1110,12 +1214,85 @@ async function wuzapiFetch(path, channel, body) {
     parsed = { raw: text };
   }
   if (!response.ok) {
-    const err = new Error(`Wuzapi ${response.status} ${path}`);
+    const err = new Error(`Wuzapi ${response.status} ${method} ${path}`);
     err.status = response.status;
     err.body = parsed;
     throw err;
   }
   return parsed;
+}
+
+function listWebhookItems(body) {
+  if (Array.isArray(body?.data)) return body.data;
+  if (Array.isArray(body?.webhooks)) return body.webhooks;
+  if (Array.isArray(body)) return body;
+  return [];
+}
+
+function webhookEvents(item) {
+  if (Array.isArray(item?.events)) return item.events.map(String);
+  if (Array.isArray(item?.Events)) return item.Events.map(String);
+  const single = item?.event || item?.Event || item?.type || item?.Type;
+  return single ? [String(single)] : [];
+}
+
+function sameEventSet(actual, desired) {
+  if (actual.length !== desired.length) return false;
+  const normalized = actual.map(String).sort().join('|');
+  return normalized === desired.map(String).sort().join('|');
+}
+
+function bridgeWebhookUrl(channelKey) {
+  return `${BRIDGE_PUBLIC_BASE_URL}/fzap/webhook/${encodeURIComponent(channelKey)}?secret=${encodeURIComponent(SECRET)}`;
+}
+
+async function ensureWuzapiWebhook(channelKey, channel) {
+  if (!SECRET) {
+    log('warn', 'wuzapi webhook auto config skipped', { channelKey, reason: 'missing_secret' });
+    return;
+  }
+  if (!channel?.token) {
+    log('warn', 'wuzapi webhook auto config skipped', { channelKey, reason: 'missing_token' });
+    return;
+  }
+
+  const url = bridgeWebhookUrl(channelKey);
+  const desiredEventSets = [['All'], ['AutomationMessage']];
+  const existingBody = await wuzapiRequest('/webhook', channel, { method: 'GET' });
+  const existing = listWebhookItems(existingBody);
+  const ours = existing.filter((item) => {
+    const itemUrl = item?.url || item?.webhookUrl || item?.WebhookUrl || '';
+    return typeof itemUrl === 'string' && itemUrl === url;
+  });
+
+  for (const desiredEvents of desiredEventSets) {
+    const match = ours.find((item) => sameEventSet(webhookEvents(item), desiredEvents));
+    const payload = { url, webhookUrl: url, events: desiredEvents };
+    if (match?.id) {
+      await wuzapiRequest(`/webhook/${match.id}`, channel, { method: 'PUT', body: payload });
+      log('info', 'wuzapi webhook updated', { channelKey, events: desiredEvents });
+    } else {
+      await wuzapiRequest('/webhook', channel, { method: 'POST', body: payload });
+      log('info', 'wuzapi webhook created', { channelKey, events: desiredEvents });
+    }
+  }
+}
+
+async function ensureAllWuzapiWebhooks() {
+  const entries = Object.entries(CHANNELS);
+  if (!entries.length) return;
+  for (const [channelKey, channel] of entries) {
+    try {
+      await ensureWuzapiWebhook(channelKey, channel);
+    } catch (err) {
+      log('warn', 'wuzapi webhook auto config failed', {
+        channelKey,
+        status: err.status,
+        body: err.body,
+        error: err.message
+      });
+    }
+  }
 }
 
 async function sendTextToWuzapi(channel, phone, content, id) {
@@ -1319,4 +1496,9 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => log('info', 'fzap evo bridge listening', { port: PORT, version: VERSION }));
+server.listen(PORT, () => {
+  log('info', 'fzap evo bridge listening', { port: PORT, version: VERSION });
+  ensureAllWuzapiWebhooks().catch((err) => {
+    log('warn', 'wuzapi webhook auto config failed', { error: err.message, stack: err.stack });
+  });
+});

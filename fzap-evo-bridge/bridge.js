@@ -43,6 +43,10 @@ function getPath(obj, path) {
   return path.split('.').reduce((acc, key) => (acc == null ? undefined : acc[key]), obj);
 }
 
+function compactObject(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== null && item !== ''));
+}
+
 function firstPath(obj, paths) {
   for (const path of paths) {
     const value = getPath(obj, path);
@@ -75,28 +79,121 @@ function digitsOnly(value) {
   return String(value || '').replace(/\D/g, '');
 }
 
+function normalizeJidValue(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value !== 'object') return String(value);
+
+  const user = value.User || value.user || value.ID || value.id || value.Phone || value.phone || '';
+  const server = value.Server || value.server || value.Domain || value.domain || '';
+  if (user && server) return `${user}@${server}`;
+  if (user) return String(user);
+  if (value.JID || value.jid) return normalizeJidValue(value.JID || value.jid);
+  return '';
+}
+
+function isLidJid(value) {
+  return normalizeJidValue(value).includes('@lid');
+}
+
 function jidToPhone(value) {
-  let text = String(value || '');
+  let text = normalizeJidValue(value);
+  if (text.includes('@lid')) return '';
   text = text.split('@')[0];
   text = text.split(':')[0];
   return digitsOnly(text);
 }
 
-function parseIncoming(payload, channelKey) {
+function extractMessageText(message) {
+  if (!message || typeof message !== 'object') return undefined;
+  return firstPath(message, [
+    'conversation',
+    'extendedTextMessage.text',
+    'imageMessage.caption',
+    'videoMessage.caption',
+    'documentMessage.caption',
+    'buttonsResponseMessage.selectedDisplayText',
+    'buttonsResponseMessage.selectedButtonId',
+    'listResponseMessage.title',
+    'listResponseMessage.singleSelectReply.selectedRowId',
+    'templateButtonReplyMessage.selectedDisplayText',
+    'templateButtonReplyMessage.selectedId'
+  ]);
+}
+
+function extractMediaUrl(payload) {
+  return firstPath(payload, [
+    's3.url',
+    'event.s3.url',
+    'data.s3.url',
+    'Data.s3.url',
+    'data.mediaUrl',
+    'Data.mediaUrl',
+    'event.mediaUrl',
+    'mediaUrl',
+    'url',
+    'downloadUrl',
+    'fileUrl'
+  ]) || walkFind(payload, ['mediaUrl', 'downloadUrl', 'fileUrl', 'url']);
+}
+
+async function reverseLid(channelKey, lid) {
+  const channel = CHANNELS[channelKey] || {};
+  if (!channel.token || !lid) return '';
+
+  const response = await fetch(`${WUZAPI_BASE_URL}/user/lid/reverse?lid=${encodeURIComponent(lid)}`, {
+    headers: { token: channel.token }
+  });
+  const text = await response.text();
+  let body;
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = { raw: text };
+  }
+  if (!response.ok) {
+    log('warn', 'lid reverse failed', { channelKey, status: response.status, body });
+    return '';
+  }
+  if (typeof body.data === 'string') return body.data;
+  return firstPath(body, ['data.jid', 'data.JID', 'jid', 'JID']) || '';
+}
+
+async function parseIncoming(payload, channelKey) {
   const fromMe = Boolean(firstPath(payload, [
+    'event.Info.IsFromMe',
     'data.Info.IsFromMe',
     'Data.Info.IsFromMe',
     'Info.IsFromMe',
+    'event.key.fromMe',
     'data.key.fromMe',
     'key.fromMe',
     'fromMe'
   ]));
   if (fromMe) return { ignore: true, reason: 'from_me' };
 
-  const jid = firstPath(payload, [
+  const rawChatJid = firstPath(payload, [
+    'event.Info.Chat',
+    'event.Info.Chat.User',
     'data.Info.Chat',
     'Data.Info.Chat',
     'Info.Chat',
+    'data.key.remoteJid',
+    'key.remoteJid',
+    'remoteJid',
+    'jid',
+    'from',
+    'phone'
+  ]);
+  const chatJidText = normalizeJidValue(rawChatJid);
+  if (chatJidText.includes('@g.us')) return { ignore: true, reason: 'group' };
+
+  const rawJid = rawChatJid || firstPath(payload, [
+    'event.Info.Sender',
+    'event.Info.Sender.User',
+    'event.key.remoteJid',
+    'event.key.senderPn',
+    'event.key.cleanedSenderPn',
     'data.Info.Sender',
     'Data.Info.Sender',
     'Info.Sender',
@@ -108,13 +205,23 @@ function parseIncoming(payload, channelKey) {
     'phone'
   ]) || walkFind(payload, ['remoteJid', 'jid']);
 
-  const jidText = String(jid || '');
+  let jidText = normalizeJidValue(rawJid);
+  if (isLidJid(jidText)) {
+    const resolvedJid = await reverseLid(channelKey, jidText);
+    if (resolvedJid) jidText = normalizeJidValue(resolvedJid);
+  }
+
   if (jidText.includes('@g.us')) return { ignore: true, reason: 'group' };
 
   const phone = jidToPhone(jidText);
   if (!phone) return { ignore: true, reason: 'no_phone' };
 
-  const text = firstPath(payload, [
+  const eventMessage = firstPath(payload, ['event.Message', 'event.message']);
+  const dataMessage = firstPath(payload, ['data.Message', 'Data.Message', 'Message']);
+  const rawText = extractMessageText(eventMessage) || extractMessageText(dataMessage) || firstPath(payload, [
+    'event.Message.conversation',
+    'event.Message.extendedTextMessage.text',
+    'event.body',
     'data.Message.conversation',
     'Data.Message.conversation',
     'Message.conversation',
@@ -127,21 +234,16 @@ function parseIncoming(payload, channelKey) {
     'content',
     'message'
   ]) || walkFind(payload, ['conversation', 'text', 'body', 'caption']);
+  const text = rawText && typeof rawText === 'object' ? extractMessageText(rawText) : rawText;
 
-  const mediaUrl = firstPath(payload, [
-    'data.mediaUrl',
-    'Data.mediaUrl',
-    'mediaUrl',
-    'url',
-    'downloadUrl',
-    'fileUrl'
-  ]) || walkFind(payload, ['mediaUrl', 'downloadUrl', 'fileUrl', 'url']);
+  const mediaUrl = extractMediaUrl(payload);
 
   let content = String(text || '').trim();
   if (!content && mediaUrl) content = `[midia recebida] ${mediaUrl}`;
   if (!content) return { ignore: true, reason: 'no_content' };
 
   const pushName = firstPath(payload, [
+    'event.Info.PushName',
     'data.Info.PushName',
     'Data.Info.PushName',
     'Info.PushName',
@@ -153,9 +255,11 @@ function parseIncoming(payload, channelKey) {
   const channel = CHANNELS[channelKey] || {};
   const sourceId = `${phone}@${channelKey}`;
   const echoId = String(firstPath(payload, [
+    'event.Info.ID',
     'data.Info.ID',
     'Data.Info.ID',
     'Info.ID',
+    'event.key.id',
     'data.key.id',
     'key.id',
     'id'
@@ -252,13 +356,21 @@ async function getOrCreateConversation(msg) {
 }
 
 async function addIncomingMessage(msg, conversationId) {
-  const encoded = encodeURIComponent(msg.sourceId);
-  return evoFetch(`/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts/${encoded}/conversations/${conversationId}/messages`, {
+  return evoFetch(`/api/v1/conversations/${conversationId}/messages`, {
     method: 'POST',
-    body: JSON.stringify({
+    body: JSON.stringify(compactObject({
       content: msg.content,
+      message_type: 'incoming',
+      private: false,
+      content_type: 'text',
+      content_attributes: {
+        external_id: msg.echoId,
+        fzap_channel: msg.channelLabel,
+        fzap_channel_key: msg.channelKey,
+        fzap_phone: msg.phone
+      },
       echo_id: msg.echoId
-    })
+    }))
   });
 }
 
@@ -318,7 +430,7 @@ async function sendToWuzapi(payload) {
 
 async function handleIncoming(req, res, channelKey) {
   const payload = await readBody(req);
-  const msg = parseIncoming(payload, channelKey);
+  const msg = await parseIncoming(payload, channelKey);
   if (msg.ignore) {
     log('info', 'incoming ignored', { channelKey, reason: msg.reason });
     return sendJson(res, 200, { ok: true, ignored: msg.reason });

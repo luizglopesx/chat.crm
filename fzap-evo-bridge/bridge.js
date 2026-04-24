@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-msg-id-fallback';
+const VERSION = 'bridge-2026-04-24-refetch-conv';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -348,6 +348,10 @@ async function evoFetch(path, options = {}) {
     err.method = method;
     throw err;
   }
+  if (typeof body === 'object' && body !== null) {
+    Object.defineProperty(body, '__rawText', { value: text, enumerable: false });
+    Object.defineProperty(body, '__status', { value: response.status, enumerable: false });
+  }
   return body;
 }
 
@@ -380,17 +384,29 @@ async function ensureContact(msg) {
   }
 }
 
-async function getOrCreateConversation(msg) {
-  const encoded = encodeURIComponent(msg.sourceId);
-  const list = await evoFetch(`/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts/${encoded}/conversations`, {
+function pickConversation(payload) {
+  const arr = Array.isArray(payload?.data?.payload) ? payload.data.payload
+    : Array.isArray(payload?.payload) ? payload.payload
+    : Array.isArray(payload?.data) ? payload.data
+    : Array.isArray(payload) ? payload
+    : [];
+  if (!arr.length) return null;
+  return arr.find(c => c && c.status === 'open') || arr[arr.length - 1];
+}
+
+async function listContactConversations(encoded) {
+  return evoFetch(`/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts/${encoded}/conversations`, {
     method: 'GET'
   }).catch(err => {
     if (err.status === 404) return { data: [] };
     throw err;
   });
+}
 
-  const conversations = Array.isArray(list.data) ? list.data : Array.isArray(list) ? list : [];
-  const existing = conversations.find(c => c.status === 'open') || conversations[0];
+async function getOrCreateConversation(msg) {
+  const encoded = encodeURIComponent(msg.sourceId);
+  const list = await listContactConversations(encoded);
+  const existing = pickConversation(list);
   if (existing) {
     log('info', 'conversation found', { id: existing.id, display_id: existing.display_id, status: existing.status });
     return { id: existing.id, displayId: existing.display_id };
@@ -406,9 +422,26 @@ async function getOrCreateConversation(msg) {
       }
     })
   });
-  const data = created.data || created;
-  log('info', 'conversation created', { id: data.id, display_id: data.display_id, raw: summarizePayload(created) });
-  return { id: data.id, displayId: data.display_id };
+  const createdData = created?.data || created;
+  let convo = { id: createdData?.id, displayId: createdData?.display_id };
+
+  if (!convo.id && !convo.displayId) {
+    log('warn', 'conversation create response had no id, refetching', {
+      raw: summarizePayload(created),
+      rawText: created?.__rawText,
+      status: created?.__status
+    });
+    const refetched = await listContactConversations(encoded);
+    const latest = pickConversation(refetched);
+    if (latest) {
+      convo = { id: latest.id, displayId: latest.display_id };
+    } else {
+      log('error', 'refetch also returned no conversation', { raw: summarizePayload(refetched) });
+    }
+  }
+
+  log('info', 'conversation created', { ...convo, status: created?.__status });
+  return convo;
 }
 
 async function addIncomingMessage(msg, conversationRef) {

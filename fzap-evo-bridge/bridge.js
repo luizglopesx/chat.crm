@@ -356,19 +356,11 @@ async function getOrCreateConversation(msg) {
 }
 
 async function addIncomingMessage(msg, conversationId) {
-  return evoFetch(`/api/v1/conversations/${conversationId}/messages`, {
+  const encoded = encodeURIComponent(msg.sourceId);
+  return evoFetch(`/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts/${encoded}/conversations/${conversationId}/messages`, {
     method: 'POST',
     body: JSON.stringify(compactObject({
       content: msg.content,
-      message_type: 'incoming',
-      private: false,
-      content_type: 'text',
-      content_attributes: {
-        external_id: msg.echoId,
-        fzap_channel: msg.channelLabel,
-        fzap_channel_key: msg.channelKey,
-        fzap_phone: msg.phone
-      },
       echo_id: msg.echoId
     }))
   });

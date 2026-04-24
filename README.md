@@ -44,6 +44,7 @@ Obrigatórias:
 Opcionais (têm default):
 
 - `EVO_BASE_URL` (default `http://chat_crm_evo_crm:3000`) — aponta direto pro container `evo_crm` da stack `chat_crm`
+- `EVO_PUBLIC_BASE_URL` (default `https://chat.senhorcolchao.com`) — usado para transformar URLs relativas de anexos do EvoCRM em URLs HTTPS públicas para a Wuzapi
 - `EVO_INBOX_IDENTIFIER` (default `fzap_whatsapp`) — usado pra resolver o `inbox_id` numérico no startup
 - `EVO_INBOX_NAME` (default `FZAP WhatsApp`) — fallback se `EVO_INBOX_IDENTIFIER` não bater
 - `EVO_INBOX_ID` — número; se definido, pula a auto-descoberta
@@ -97,13 +98,15 @@ Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api-accountl
 
 - Texto entrante (WhatsApp → EvoCRM): suportado via Agent API.
 - Texto sainte (EvoCRM/Agente de IA → WhatsApp): suportado via `/chat/send/text` da Wuzapi; HTML do editor rico é convertido para texto limpo antes do envio.
+- Anexos saindo do EvoCRM para WhatsApp: imagem, áudio, vídeo, documento e sticker são encaminhados para os endpoints específicos da Wuzapi quando o webhook do EvoCRM envia `attachments` com URL pública.
+- Contato/vCard e localização saindo do EvoCRM para WhatsApp: suportados quando o webhook traz `content_attributes` com `vcard` ou coordenadas.
 - LID da FZAP: tenta campos `SenderPN`/`SenderAlt`/`ChatAlt` antes de cair no reverseLid.
-- Mídia/áudio/documento: fallback como `[midia recebida] <url>` quando a Wuzapi envia URL no webhook; sem upload direto ao EvoCRM ainda.
+- Mídia/áudio/documento entrando do WhatsApp para EvoCRM: fallback classificado como `[imagem recebida] <url>`, `[audio recebido] <url>`, etc.; sem upload direto ao EvoCRM ainda.
 
 ## Status e próximos passos
 
 - ✅ Automação commit → deploy (GitHub Actions + GHCR + Portainer webhook)
 - ✅ Contatos e conversas sendo criados no EvoCRM (via Agent API)
-- ⏳ Confirmar que mensagens entrantes aparecem na timeline com `bridge-2026-04-24-outgoing-cleanup`
+- ⏳ Confirmar anexos saindo do EvoCRM para WhatsApp com `bridge-2026-04-24-media-outgoing`
 - ⏳ Mídia/áudio/documentos: upload via `attachments` do EvoCRM em vez de só o link
 - ⏳ Conversas antigas vazias no CRM: não preenchem retroativamente; limpar manualmente

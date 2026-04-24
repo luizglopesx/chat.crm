@@ -1,9 +1,10 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-outgoing-cleanup';
+const VERSION = 'bridge-2026-04-24-media-outgoing';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
+const EVO_PUBLIC_BASE_URL = (process.env.EVO_PUBLIC_BASE_URL || 'https://chat.senhorcolchao.com').replace(/\/$/, '');
 const EVO_API_TOKEN = process.env.EVO_API_TOKEN || '';
 const EVO_INBOX_ID_ENV = process.env.EVO_INBOX_ID ? Number(process.env.EVO_INBOX_ID) : 0;
 const EVO_INBOX_IDENTIFIER = process.env.EVO_INBOX_IDENTIFIER || 'fzap_whatsapp';
@@ -129,6 +130,122 @@ function isOutgoingMessage(payload) {
   return false;
 }
 
+function asArray(value) {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function absoluteUrl(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (text.startsWith(EVO_BASE_URL)) return `${EVO_PUBLIC_BASE_URL}${text.slice(EVO_BASE_URL.length)}`;
+  if (/^https?:\/\//i.test(text)) return text;
+  if (text.startsWith('/')) return `${EVO_PUBLIC_BASE_URL}${text}`;
+  return text;
+}
+
+function filenameFromUrl(url) {
+  try {
+    const pathname = new URL(url).pathname;
+    return decodeURIComponent(pathname.split('/').filter(Boolean).pop() || '');
+  } catch {
+    return '';
+  }
+}
+
+function attachmentUrl(attachment) {
+  return absoluteUrl(firstPath(attachment, [
+    'data_url',
+    'download_url',
+    'downloadUrl',
+    'file_url',
+    'fileUrl',
+    'url',
+    'attachment.url',
+    'attachment.data_url'
+  ]));
+}
+
+function attachmentName(attachment, url = '') {
+  return firstPath(attachment, [
+    'file_name',
+    'filename',
+    'name',
+    'title',
+    'attachment.file_name',
+    'attachment.filename'
+  ]) || filenameFromUrl(url) || 'arquivo';
+}
+
+function attachmentMime(attachment) {
+  return String(firstPath(attachment, [
+    'mime_type',
+    'mimeType',
+    'content_type',
+    'contentType',
+    'attachment.mime_type',
+    'attachment.content_type'
+  ]) || '').toLowerCase();
+}
+
+function attachmentType(attachment) {
+  const explicit = String(firstPath(attachment, [
+    'file_type',
+    'fileType',
+    'type',
+    'message_type',
+    'attachment.file_type'
+  ]) || '').toLowerCase();
+  const mime = attachmentMime(attachment);
+  const name = attachmentName(attachment).toLowerCase();
+
+  if (explicit.includes('sticker') || name.endsWith('.webp')) return 'sticker';
+  if (explicit.includes('image') || mime.startsWith('image/')) return 'image';
+  if (explicit.includes('audio') || mime.startsWith('audio/')) return 'audio';
+  if (explicit.includes('video') || mime.startsWith('video/')) return 'video';
+  return 'document';
+}
+
+function outgoingAttachments(payload) {
+  return [
+    ...asArray(payload.attachments),
+    ...asArray(payload.attachment),
+    ...asArray(payload.message?.attachments)
+  ].filter(Boolean);
+}
+
+function outgoingLocation(payload) {
+  const attrs = payload.content_attributes || payload.additional_attributes || {};
+  const latitude = firstPath(payload, ['latitude', 'location.latitude', 'content_attributes.latitude'])
+    ?? attrs.latitude
+    ?? attrs.lat;
+  const longitude = firstPath(payload, ['longitude', 'location.longitude', 'content_attributes.longitude'])
+    ?? attrs.longitude
+    ?? attrs.lng
+    ?? attrs.long;
+  if (latitude === undefined || longitude === undefined) return null;
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return {
+    latitude: lat,
+    longitude: lng,
+    name: firstPath(payload, ['location.name', 'content_attributes.name']) || attrs.name || attrs.location_name,
+    address: firstPath(payload, ['location.address', 'content_attributes.address']) || attrs.address,
+    url: firstPath(payload, ['location.url', 'content_attributes.url']) || attrs.url
+  };
+}
+
+function outgoingContact(payload) {
+  const attrs = payload.content_attributes || payload.additional_attributes || {};
+  const vcard = firstPath(payload, ['vcard', 'contact.vcard', 'content_attributes.vcard']) || attrs.vcard;
+  if (!vcard) return null;
+  return {
+    name: firstPath(payload, ['contact.name', 'content_attributes.name']) || attrs.name || attrs.full_name || 'Contato',
+    vcard
+  };
+}
+
 function normalizeJidValue(value) {
   if (!value) return '';
   if (typeof value === 'string') return value;
@@ -185,6 +302,45 @@ function extractMediaUrl(payload) {
     'downloadUrl',
     'fileUrl'
   ]) || walkFind(payload, ['mediaUrl', 'downloadUrl', 'fileUrl', 'url']);
+}
+
+function incomingMediaKind(message, payload) {
+  const keys = message && typeof message === 'object' ? Object.keys(message) : [];
+  const byKey = keys.find(key => /Message$/i.test(key));
+  const typeText = String(firstPath(payload, [
+    'event.Info.Type',
+    'data.Info.Type',
+    'Data.Info.Type',
+    'type',
+    'messageType',
+    'mediaType'
+  ]) || byKey || '').toLowerCase();
+
+  if (typeText.includes('image')) return 'imagem';
+  if (typeText.includes('audio') || typeText.includes('ptt')) return 'audio';
+  if (typeText.includes('video')) return 'video';
+  if (typeText.includes('document')) return 'documento';
+  if (typeText.includes('sticker')) return 'sticker';
+  if (typeText.includes('contact') || typeText.includes('vcard')) return 'contato';
+  if (typeText.includes('location')) return 'localizacao';
+  return 'midia';
+}
+
+function incomingLocationText(message) {
+  const latitude = firstPath(message, ['locationMessage.degreesLatitude', 'liveLocationMessage.degreesLatitude']);
+  const longitude = firstPath(message, ['locationMessage.degreesLongitude', 'liveLocationMessage.degreesLongitude']);
+  if (latitude === undefined || longitude === undefined) return '';
+  const name = firstPath(message, ['locationMessage.name', 'liveLocationMessage.name']);
+  const address = firstPath(message, ['locationMessage.address', 'liveLocationMessage.address']);
+  const maps = `https://maps.google.com/?q=${latitude},${longitude}`;
+  return [`[localizacao recebida]`, name, address, maps].filter(Boolean).join('\n');
+}
+
+function incomingContactText(message) {
+  const displayName = firstPath(message, ['contactMessage.displayName', 'contactsArrayMessage.contacts.0.displayName']);
+  const vcard = firstPath(message, ['contactMessage.vcard', 'contactsArrayMessage.contacts.0.vcard']);
+  if (!displayName && !vcard) return '';
+  return [`[contato recebido] ${displayName || ''}`.trim(), vcard].filter(Boolean).join('\n');
 }
 
 async function reverseLid(channelKey, lid) {
@@ -325,9 +481,13 @@ async function parseIncoming(payload, channelKey) {
   const text = rawText && typeof rawText === 'object' ? extractMessageText(rawText) : rawText;
 
   const mediaUrl = extractMediaUrl(payload);
+  const locationText = incomingLocationText(eventMessage || dataMessage);
+  const contactText = incomingContactText(eventMessage || dataMessage);
 
   let content = String(text || '').trim();
-  if (!content && mediaUrl) content = `[midia recebida] ${mediaUrl}`;
+  if (!content && locationText) content = locationText;
+  if (!content && contactText) content = contactText;
+  if (!content && mediaUrl) content = `[${incomingMediaKind(eventMessage || dataMessage, payload)} recebida] ${mediaUrl}`;
   if (!content) return { ignore: true, reason: 'no_content' };
 
   const pushName = firstPath(payload, [
@@ -555,6 +715,107 @@ function phoneFromSource(sourceId, sender) {
   return digitsOnly(phone || sender?.phone_number || sender?.identifier || '');
 }
 
+async function wuzapiFetch(path, channel, body) {
+  const response = await fetch(`${WUZAPI_BASE_URL}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', token: channel.token },
+    body: JSON.stringify(body)
+  });
+  const text = await response.text();
+  let parsed;
+  try {
+    parsed = text ? JSON.parse(text) : {};
+  } catch {
+    parsed = { raw: text };
+  }
+  if (!response.ok) {
+    const err = new Error(`Wuzapi ${response.status} ${path}`);
+    err.status = response.status;
+    err.body = parsed;
+    throw err;
+  }
+  return parsed;
+}
+
+async function sendTextToWuzapi(channel, phone, content) {
+  if (!content) return { ignored: 'empty_text' };
+  const response = await wuzapiFetch('/chat/send/text', channel, {
+    phone,
+    body: content,
+    check: true,
+    linkPreview: true
+  });
+  return { type: 'text', response };
+}
+
+async function sendLocationToWuzapi(channel, phone, location) {
+  const response = await wuzapiFetch('/chat/send/location', channel, compactObject({
+    phone,
+    latitude: location.latitude,
+    longitude: location.longitude,
+    name: location.name,
+    address: location.address,
+    url: location.url,
+    check: true
+  }));
+  return { type: 'location', response };
+}
+
+async function sendContactToWuzapi(channel, phone, contact) {
+  const response = await wuzapiFetch('/chat/send/contact', channel, {
+    phone,
+    name: contact.name,
+    vcard: contact.vcard,
+    check: true
+  });
+  return { type: 'contact', response };
+}
+
+async function sendAttachmentToWuzapi(channel, phone, attachment, caption = '') {
+  const url = attachmentUrl(attachment);
+  if (!url) return { ignored: 'attachment_no_url', attachment: summarizePayload(attachment) };
+
+  const type = attachmentType(attachment);
+  const fileName = attachmentName(attachment, url);
+  const mimeType = attachmentMime(attachment);
+  const base = compactObject({
+    phone,
+    caption,
+    fileName,
+    mimeType,
+    check: true
+  });
+
+  if (type === 'image') {
+    const response = await wuzapiFetch('/chat/send/image', channel, { ...base, image: url });
+    return { type, fileName, response };
+  }
+  if (type === 'audio') {
+    const response = await wuzapiFetch('/chat/send/audio', channel, {
+      ...base,
+      audio: url,
+      ptt: mimeType.includes('ogg') || mimeType.includes('opus')
+    });
+    return { type, fileName, response };
+  }
+  if (type === 'video') {
+    const response = await wuzapiFetch('/chat/send/video', channel, { ...base, video: url });
+    return { type, fileName, response };
+  }
+  if (type === 'sticker') {
+    const response = await wuzapiFetch('/chat/send/sticker', channel, compactObject({
+      phone,
+      sticker: url,
+      mimeType: mimeType || 'image/webp',
+      check: true
+    }));
+    return { type, fileName, response };
+  }
+
+  const response = await wuzapiFetch('/chat/send/document', channel, { ...base, document: url });
+  return { type: 'document', fileName, response };
+}
+
 async function sendToWuzapi(payload) {
   if (payload.event !== 'message_created') {
     log('info', 'outgoing ignored', { reason: 'event', event: payload.event });
@@ -582,32 +843,24 @@ async function sendToWuzapi(payload) {
   if (!phone) throw new Error('missing destination phone');
 
   const content = normalizeOutgoingContent(payload.content);
-  if (!content) return { ignored: 'empty_content' };
+  const location = outgoingLocation(payload);
+  const contact = outgoingContact(payload);
+  const attachments = outgoingAttachments(payload);
+  const results = [];
 
-  const response = await fetch(`${WUZAPI_BASE_URL}/chat/send/text`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', token: channel.token },
-    body: JSON.stringify({
-      phone,
-      body: content,
-      check: true,
-      linkPreview: true
-    })
-  });
-  const text = await response.text();
-  let body;
-  try {
-    body = text ? JSON.parse(text) : {};
-  } catch {
-    body = { raw: text };
+  if (location) results.push(await sendLocationToWuzapi(channel, phone, location));
+  if (contact) results.push(await sendContactToWuzapi(channel, phone, contact));
+
+  if (attachments.length) {
+    for (const [index, attachment] of attachments.entries()) {
+      results.push(await sendAttachmentToWuzapi(channel, phone, attachment, index === 0 ? content : ''));
+    }
+  } else if (!location && !contact && content) {
+    results.push(await sendTextToWuzapi(channel, phone, content));
   }
-  if (!response.ok) {
-    const err = new Error(`Wuzapi ${response.status}`);
-    err.status = response.status;
-    err.body = body;
-    throw err;
-  }
-  return { sent: true, channel: channel.label || channelKey, phone, response: body };
+
+  if (!results.length) return { ignored: 'empty_content' };
+  return { sent: true, channel: channel.label || channelKey, phone, results };
 }
 
 async function handleIncoming(req, res, channelKey) {

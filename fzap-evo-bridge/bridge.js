@@ -1,5 +1,6 @@
 const http = require('http');
 
+const VERSION = 'bridge-2026-04-24-public-api';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -77,6 +78,16 @@ function walkFind(obj, names) {
 
 function digitsOnly(value) {
   return String(value || '').replace(/\D/g, '');
+}
+
+function summarizePayload(payload) {
+  try {
+    const text = JSON.stringify(payload);
+    if (!text) return '';
+    return text.length > 2000 ? `${text.slice(0, 2000)}...[truncated ${text.length}]` : text;
+  } catch {
+    return String(payload);
+  }
 }
 
 function normalizeJidValue(value) {
@@ -188,15 +199,34 @@ async function parseIncoming(payload, channelKey) {
   const chatJidText = normalizeJidValue(rawChatJid);
   if (chatJidText.includes('@g.us')) return { ignore: true, reason: 'group' };
 
-  const rawJid = rawChatJid || firstPath(payload, [
-    'event.Info.Sender',
-    'event.Info.Sender.User',
-    'event.key.remoteJid',
+  const phoneAltJid = firstPath(payload, [
+    'event.Info.SenderPN',
+    'event.Info.SenderPn',
+    'event.Info.SenderAlt',
+    'event.Info.ChatAlt',
+    'data.Info.SenderPN',
+    'data.Info.SenderAlt',
+    'data.Info.ChatAlt',
+    'Data.Info.SenderPN',
+    'Data.Info.SenderAlt',
+    'Data.Info.ChatAlt',
+    'Info.SenderPN',
+    'Info.SenderAlt',
+    'Info.ChatAlt',
     'event.key.senderPn',
     'event.key.cleanedSenderPn',
+    'data.key.senderPn',
+    'key.senderPn',
+    'senderPn'
+  ]);
+
+  const rawSenderJid = firstPath(payload, [
+    'event.Info.Sender',
+    'event.Info.Sender.User',
     'data.Info.Sender',
     'Data.Info.Sender',
     'Info.Sender',
+    'event.key.remoteJid',
     'data.key.remoteJid',
     'key.remoteJid',
     'remoteJid',
@@ -205,16 +235,35 @@ async function parseIncoming(payload, channelKey) {
     'phone'
   ]) || walkFind(payload, ['remoteJid', 'jid']);
 
-  let jidText = normalizeJidValue(rawJid);
-  if (isLidJid(jidText)) {
-    const resolvedJid = await reverseLid(channelKey, jidText);
-    if (resolvedJid) jidText = normalizeJidValue(resolvedJid);
+  const candidates = [phoneAltJid, rawChatJid, rawSenderJid].filter(Boolean);
+  let jidText = '';
+  for (const cand of candidates) {
+    const text = normalizeJidValue(cand);
+    if (text && !isLidJid(text)) { jidText = text; break; }
+  }
+  if (!jidText) {
+    const fallback = normalizeJidValue(candidates[0] || '');
+    if (isLidJid(fallback)) {
+      const resolved = await reverseLid(channelKey, fallback);
+      if (resolved) jidText = normalizeJidValue(resolved);
+    } else {
+      jidText = fallback;
+    }
   }
 
   if (jidText.includes('@g.us')) return { ignore: true, reason: 'group' };
 
   const phone = jidToPhone(jidText);
-  if (!phone) return { ignore: true, reason: 'no_phone' };
+  if (!phone) {
+    log('warn', 'no_phone debug', {
+      channelKey,
+      chatJid: chatJidText,
+      senderJid: normalizeJidValue(rawSenderJid),
+      phoneAltJid: normalizeJidValue(phoneAltJid),
+      payloadSnippet: summarizePayload(payload)
+    });
+    return { ignore: true, reason: 'no_phone' };
+  }
 
   const eventMessage = firstPath(payload, ['event.Message', 'event.message']);
   const dataMessage = firstPath(payload, ['data.Message', 'Data.Message', 'Message']);
@@ -460,4 +509,4 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => log('info', 'fzap evo bridge listening', { port: PORT }));
+server.listen(PORT, () => log('info', 'fzap evo bridge listening', { port: PORT, version: VERSION }));

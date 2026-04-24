@@ -97,16 +97,17 @@ Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api-accountl
 ## Escopo atual
 
 - Texto entrante (WhatsApp → EvoCRM): suportado via Agent API.
+- Deduplicação de mensagens entrantes: a bridge ignora o mesmo `echo_id`/ID de mensagem da Wuzapi por 10 minutos para evitar duplicidade quando o webhook é reenviado.
 - Texto sainte (EvoCRM/Agente de IA → WhatsApp): suportado via `/chat/send/text` da Wuzapi; HTML do editor rico é convertido para texto limpo antes do envio.
 - Anexos saindo do EvoCRM para WhatsApp: imagem, áudio, vídeo, documento e sticker são encaminhados para os endpoints específicos da Wuzapi quando o webhook do EvoCRM envia `attachments` com URL pública.
 - Contato/vCard e localização saindo do EvoCRM para WhatsApp: suportados quando o webhook traz `content_attributes` com `vcard` ou coordenadas.
 - LID da FZAP: tenta campos `SenderPN`/`SenderAlt`/`ChatAlt` antes de cair no reverseLid.
-- Mídia/áudio/documento entrando do WhatsApp para EvoCRM: fallback classificado como `[imagem recebida] <url>`, `[audio recebido] <url>`, etc.; sem upload direto ao EvoCRM ainda.
+- Mídia/áudio/documento entrando do WhatsApp para EvoCRM: a bridge tenta baixar a URL da Wuzapi e postar no EvoCRM como `attachments[]`; se falhar, usa fallback classificado com link.
 
 ## Status e próximos passos
 
 - ✅ Automação commit → deploy (GitHub Actions + GHCR + Portainer webhook)
 - ✅ Contatos e conversas sendo criados no EvoCRM (via Agent API)
-- ⏳ Confirmar anexos saindo do EvoCRM para WhatsApp com `bridge-2026-04-24-media-outgoing`
-- ⏳ Mídia/áudio/documentos: upload via `attachments` do EvoCRM em vez de só o link
+- ⏳ Confirmar anexos entrando e saindo com `bridge-2026-04-24-incoming-media-dedupe`
+- ⏳ Validar sticker, vCard e localização com payload real
 - ⏳ Conversas antigas vazias no CRM: não preenchem retroativamente; limpar manualmente

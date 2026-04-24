@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-media-outgoing';
+const VERSION = 'bridge-2026-04-24-incoming-media-dedupe';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -11,6 +11,8 @@ const EVO_INBOX_IDENTIFIER = process.env.EVO_INBOX_IDENTIFIER || 'fzap_whatsapp'
 const EVO_INBOX_NAME = process.env.EVO_INBOX_NAME || 'FZAP WhatsApp';
 const WUZAPI_BASE_URL = (process.env.WUZAPI_BASE_URL || 'https://wuzapi.senhorcolchao.com').replace(/\/$/, '');
 const CHANNELS = JSON.parse(process.env.FZAP_CHANNELS_JSON || '{}');
+const INCOMING_DEDUPE_TTL_MS = 10 * 60 * 1000;
+const recentIncomingMessages = new Map();
 
 function log(level, message, data = {}) {
   console.log(JSON.stringify({ ts: new Date().toISOString(), level, message, ...data }));
@@ -188,6 +190,29 @@ function attachmentMime(attachment) {
   ]) || '').toLowerCase();
 }
 
+function extensionForMime(mimeType) {
+  const mime = String(mimeType || '').toLowerCase();
+  if (mime.includes('jpeg')) return 'jpg';
+  if (mime.includes('png')) return 'png';
+  if (mime.includes('webp')) return 'webp';
+  if (mime.includes('gif')) return 'gif';
+  if (mime.includes('mpeg')) return 'mp3';
+  if (mime.includes('ogg')) return 'ogg';
+  if (mime.includes('mp4')) return 'mp4';
+  if (mime.includes('pdf')) return 'pdf';
+  return 'bin';
+}
+
+function contentDispositionFilename(value) {
+  const text = String(value || '');
+  const utf8 = text.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8) return decodeURIComponent(utf8[1]);
+  const quoted = text.match(/filename="([^"]+)"/i);
+  if (quoted) return quoted[1];
+  const plain = text.match(/filename=([^;]+)/i);
+  return plain ? plain[1].trim() : '';
+}
+
 function attachmentType(attachment) {
   const explicit = String(firstPath(attachment, [
     'file_type',
@@ -324,6 +349,18 @@ function incomingMediaKind(message, payload) {
   if (typeText.includes('contact') || typeText.includes('vcard')) return 'contato';
   if (typeText.includes('location')) return 'localizacao';
   return 'midia';
+}
+
+function incomingMediaFileName(payload, mediaUrl, mediaKind, mimeType = '') {
+  return firstPath(payload, [
+    'event.Message.documentMessage.fileName',
+    'data.Message.documentMessage.fileName',
+    'Data.Message.documentMessage.fileName',
+    'Message.documentMessage.fileName',
+    'fileName',
+    'filename',
+    'name'
+  ]) || filenameFromUrl(mediaUrl) || `${mediaKind || 'midia'}-${Date.now()}.${extensionForMime(mimeType)}`;
 }
 
 function incomingLocationText(message) {
@@ -481,13 +518,14 @@ async function parseIncoming(payload, channelKey) {
   const text = rawText && typeof rawText === 'object' ? extractMessageText(rawText) : rawText;
 
   const mediaUrl = extractMediaUrl(payload);
+  const mediaKind = mediaUrl ? incomingMediaKind(eventMessage || dataMessage, payload) : '';
   const locationText = incomingLocationText(eventMessage || dataMessage);
   const contactText = incomingContactText(eventMessage || dataMessage);
 
   let content = String(text || '').trim();
   if (!content && locationText) content = locationText;
   if (!content && contactText) content = contactText;
-  if (!content && mediaUrl) content = `[${incomingMediaKind(eventMessage || dataMessage, payload)} recebida] ${mediaUrl}`;
+  if (!content && mediaUrl) content = `[${mediaKind} recebida]`;
   if (!content) return { ignore: true, reason: 'no_content' };
 
   const pushName = firstPath(payload, [
@@ -518,10 +556,29 @@ async function parseIncoming(payload, channelKey) {
     sourceId,
     name: String(pushName),
     content,
+    mediaUrl,
+    mediaKind,
+    mediaFileName: mediaUrl ? incomingMediaFileName(payload, mediaUrl, mediaKind) : '',
     echoId,
     channelKey,
     channelLabel: channel.label || channelKey
   };
+}
+
+function cleanupIncomingDedupe(now = Date.now()) {
+  for (const [key, ts] of recentIncomingMessages.entries()) {
+    if (now - ts > INCOMING_DEDUPE_TTL_MS) recentIncomingMessages.delete(key);
+  }
+}
+
+function markIncomingMessage(msg) {
+  if (!msg.echoId || msg.echoId.includes(`${msg.channelKey}-`)) return { duplicate: false, key: '' };
+  const now = Date.now();
+  cleanupIncomingDedupe(now);
+  const key = `${msg.channelKey}:${msg.echoId}`;
+  if (recentIncomingMessages.has(key)) return { duplicate: true, key };
+  recentIncomingMessages.set(key, now);
+  return { duplicate: false, key };
 }
 
 async function evoFetch(path, options = {}) {
@@ -550,6 +607,30 @@ async function evoFetch(path, options = {}) {
   if (typeof body === 'object' && body !== null) {
     Object.defineProperty(body, '__rawText', { value: text, enumerable: false });
     Object.defineProperty(body, '__status', { value: response.status, enumerable: false });
+  }
+  return body;
+}
+
+async function evoFetchForm(path, form) {
+  const response = await fetch(`${EVO_BASE_URL}${path}`, {
+    method: 'POST',
+    headers: { api_access_token: EVO_API_TOKEN },
+    body: form
+  });
+  const text = await response.text();
+  let body;
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = { raw: text };
+  }
+  if (!response.ok) {
+    const err = new Error(`EvoCRM ${response.status} POST ${path}`);
+    err.status = response.status;
+    err.body = body;
+    err.path = path;
+    err.method = 'POST';
+    throw err;
   }
   return body;
 }
@@ -690,6 +771,22 @@ async function getOrCreateConversation(msg, ctx, inboxId) {
 }
 
 async function addIncomingMessage(msg, conversationId) {
+  if (msg.mediaUrl) {
+    try {
+      return await addIncomingMediaMessage(msg, conversationId);
+    } catch (err) {
+      log('warn', 'incoming media upload failed, falling back to link', {
+        conversationId,
+        echoId: msg.echoId,
+        mediaUrl: msg.mediaUrl,
+        status: err.status,
+        body: err.body,
+        error: err.message
+      });
+      msg.content = `${msg.content}\n${msg.mediaUrl}`.trim();
+    }
+  }
+
   const result = await evoFetch(`/api/v1/conversations/${conversationId}/messages`, {
     method: 'POST',
     body: JSON.stringify(compactObject({
@@ -700,6 +797,51 @@ async function addIncomingMessage(msg, conversationId) {
     }))
   });
   log('info', 'message created', { conversationId, messageId: result?.id });
+  return result;
+}
+
+async function downloadIncomingMedia(msg) {
+  const channel = CHANNELS[msg.channelKey] || {};
+  const headers = channel.token ? { token: channel.token } : {};
+  const response = await fetch(msg.mediaUrl, { headers });
+  if (!response.ok) {
+    const err = new Error(`media download ${response.status}`);
+    err.status = response.status;
+    err.body = { url: msg.mediaUrl };
+    throw err;
+  }
+
+  const mimeType = response.headers.get('content-type') || 'application/octet-stream';
+  const disposition = response.headers.get('content-disposition') || '';
+  const fileName = contentDispositionFilename(disposition)
+    || msg.mediaFileName
+    || incomingMediaFileName({}, msg.mediaUrl, msg.mediaKind, mimeType);
+  const bytes = await response.arrayBuffer();
+  return {
+    blob: new Blob([bytes], { type: mimeType }),
+    fileName,
+    mimeType,
+    size: bytes.byteLength
+  };
+}
+
+async function addIncomingMediaMessage(msg, conversationId) {
+  const media = await downloadIncomingMedia(msg);
+  const form = new FormData();
+  form.append('content', msg.content);
+  form.append('message_type', 'incoming');
+  form.append('private', 'false');
+  form.append('echo_id', msg.echoId);
+  form.append('attachments[]', media.blob, media.fileName);
+
+  const result = await evoFetchForm(`/api/v1/conversations/${conversationId}/messages`, form);
+  log('info', 'media message created', {
+    conversationId,
+    messageId: result?.id,
+    fileName: media.fileName,
+    mimeType: media.mimeType,
+    size: media.size
+  });
   return result;
 }
 
@@ -870,12 +1012,23 @@ async function handleIncoming(req, res, channelKey) {
     log('info', 'incoming ignored', { channelKey, reason: msg.reason });
     return sendJson(res, 200, { ok: true, ignored: msg.reason });
   }
-  const inboxId = await resolveInboxId();
-  const contactCtx = await ensureContact(msg, inboxId);
-  const conversationId = await getOrCreateConversation(msg, contactCtx, inboxId);
-  await addIncomingMessage(msg, conversationId);
-  log('info', 'incoming synced', { channelKey, phone: msg.phone, conversationId, contactId: contactCtx.contactId });
-  sendJson(res, 200, { ok: true, conversationId });
+  const dedupe = markIncomingMessage(msg);
+  if (dedupe.duplicate) {
+    log('info', 'incoming duplicate ignored', { channelKey, echoId: msg.echoId, dedupeKey: dedupe.key });
+    return sendJson(res, 200, { ok: true, ignored: 'duplicate' });
+  }
+
+  try {
+    const inboxId = await resolveInboxId();
+    const contactCtx = await ensureContact(msg, inboxId);
+    const conversationId = await getOrCreateConversation(msg, contactCtx, inboxId);
+    await addIncomingMessage(msg, conversationId);
+    log('info', 'incoming synced', { channelKey, phone: msg.phone, conversationId, contactId: contactCtx.contactId, media: Boolean(msg.mediaUrl) });
+    sendJson(res, 200, { ok: true, conversationId });
+  } catch (err) {
+    if (dedupe.key) recentIncomingMessages.delete(dedupe.key);
+    throw err;
+  }
 }
 
 async function handleOutgoing(req, res) {

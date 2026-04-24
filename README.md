@@ -44,7 +44,6 @@ Obrigatórias:
 Opcionais (têm default):
 
 - `EVO_BASE_URL` (default `http://chat_crm_evo_crm:3000`) — aponta direto pro container `evo_crm` da stack `chat_crm`
-- `EVO_ACCOUNT_ID` (default `1`)
 - `EVO_INBOX_IDENTIFIER` (default `fzap_whatsapp`) — usado pra resolver o `inbox_id` numérico no startup
 - `EVO_INBOX_NAME` (default `FZAP WhatsApp`) — fallback se `EVO_INBOX_IDENTIFIER` não bater
 - `EVO_INBOX_ID` — número; se definido, pula a auto-descoberta
@@ -55,7 +54,7 @@ Os segredos reais ficam só no Portainer, nunca no Git.
 
 ## Como a bridge fala com o EvoCRM
 
-A bridge usa a **Agent API do Chatwoot** (`/api/v1/accounts/{account_id}/...`), não a Public API, porque o EvoCRM Community retorna `204 No Content` com body vazio no POST de criar conversa da Public API, deixando a bridge sem `id` pra postar a mensagem.
+A bridge usa a **API autenticada do EvoCRM** (`/api/v1/...` com header `api_access_token`), não a Public API, porque o EvoCRM Community retorna `204 No Content` com body vazio no POST de criar conversa da Public API, deixando a bridge sem `id` pra postar a mensagem. Nesta instalação, as rotas existem sem o prefixo `/accounts/{account_id}`.
 
 Passos por mensagem entrante:
 
@@ -92,7 +91,7 @@ Feita uma vez, nunca mais precisa:
 
 ## Debug
 
-Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api`). Em caso de erro, o log traz a URL e método que falharam (`EvoCRM 404 GET /api/v1/accounts/1/...`), além de snippets do payload FZAP quando a extração de telefone falha.
+Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api-accountless`). Em caso de erro, o log traz a URL e método que falharam (`EvoCRM 404 GET /api/v1/...`), além de snippets do payload FZAP quando a extração de telefone falha.
 
 ## Escopo atual
 
@@ -105,6 +104,6 @@ Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api`). Em ca
 
 - ✅ Automação commit → deploy (GitHub Actions + GHCR + Portainer webhook)
 - ✅ Contatos e conversas sendo criados no EvoCRM (via Agent API)
-- ⏳ Confirmar que mensagens entrantes aparecem na timeline com `bridge-2026-04-24-agent-api`
+- ⏳ Confirmar que mensagens entrantes aparecem na timeline com `bridge-2026-04-24-agent-api-accountless`
 - ⏳ Mídia/áudio/documentos: upload via `attachments` do EvoCRM em vez de só o link
 - ⏳ Conversas antigas vazias no CRM: não preenchem retroativamente; limpar manualmente

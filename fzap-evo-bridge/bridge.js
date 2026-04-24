@@ -1,11 +1,10 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-agent-api';
+const VERSION = 'bridge-2026-04-24-agent-api-accountless';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
 const EVO_API_TOKEN = process.env.EVO_API_TOKEN || '';
-const EVO_ACCOUNT_ID = Number(process.env.EVO_ACCOUNT_ID || '1');
 const EVO_INBOX_ID_ENV = process.env.EVO_INBOX_ID ? Number(process.env.EVO_INBOX_ID) : 0;
 const EVO_INBOX_IDENTIFIER = process.env.EVO_INBOX_IDENTIFIER || 'fzap_whatsapp';
 const EVO_INBOX_NAME = process.env.EVO_INBOX_NAME || 'FZAP WhatsApp';
@@ -365,7 +364,7 @@ async function resolveInboxId() {
   if (resolvedInboxId) return resolvedInboxId;
   if (!inboxResolutionPromise) {
     inboxResolutionPromise = (async () => {
-      const resp = await evoFetch(`/api/v1/accounts/${EVO_ACCOUNT_ID}/inboxes`);
+      const resp = await evoFetch('/api/v1/inboxes');
       const items = Array.isArray(resp?.payload) ? resp.payload
         : Array.isArray(resp?.data?.payload) ? resp.data.payload
         : Array.isArray(resp?.data) ? resp.data
@@ -389,7 +388,7 @@ async function resolveInboxId() {
 async function findContactBySourceId(sourceId, phone) {
   const q = encodeURIComponent(phone);
   const resp = await evoFetch(
-    `/api/v1/accounts/${EVO_ACCOUNT_ID}/contacts/search?q=${q}&include=contact_inboxes`
+    `/api/v1/contacts/search?q=${q}&include=contact_inboxes`
   ).catch(err => { if (err.status === 404) return { payload: [] }; throw err; });
   const items = Array.isArray(resp?.payload) ? resp.payload
     : Array.isArray(resp?.data?.payload) ? resp.data.payload
@@ -405,7 +404,7 @@ async function findContactBySourceId(sourceId, phone) {
 }
 
 async function createContactInbox(contactId, sourceId, inboxId) {
-  const resp = await evoFetch(`/api/v1/accounts/${EVO_ACCOUNT_ID}/contacts/${contactId}/contact_inboxes`, {
+  const resp = await evoFetch(`/api/v1/contacts/${contactId}/contact_inboxes`, {
     method: 'POST',
     body: JSON.stringify({ inbox_id: inboxId, source_id: sourceId })
   });
@@ -425,7 +424,7 @@ async function ensureContact(msg, inboxId) {
     return { contactId: existing.contactId, ...ci };
   }
 
-  const created = await evoFetch(`/api/v1/accounts/${EVO_ACCOUNT_ID}/contacts`, {
+  const created = await evoFetch('/api/v1/contacts', {
     method: 'POST',
     body: JSON.stringify({
       inbox_id: inboxId,
@@ -459,7 +458,7 @@ async function ensureContact(msg, inboxId) {
 }
 
 async function getOrCreateConversation(msg, ctx, inboxId) {
-  const list = await evoFetch(`/api/v1/accounts/${EVO_ACCOUNT_ID}/contacts/${ctx.contactId}/conversations`)
+  const list = await evoFetch(`/api/v1/contacts/${ctx.contactId}/conversations`)
     .catch(err => { if (err.status === 404) return { payload: [] }; throw err; });
   const items = Array.isArray(list?.payload) ? list.payload
     : Array.isArray(list?.data?.payload) ? list.data.payload
@@ -472,7 +471,7 @@ async function getOrCreateConversation(msg, ctx, inboxId) {
     return existing.id;
   }
 
-  const created = await evoFetch(`/api/v1/accounts/${EVO_ACCOUNT_ID}/conversations`, {
+  const created = await evoFetch('/api/v1/conversations', {
     method: 'POST',
     body: JSON.stringify({
       source_id: msg.sourceId,
@@ -494,7 +493,7 @@ async function getOrCreateConversation(msg, ctx, inboxId) {
 }
 
 async function addIncomingMessage(msg, conversationId) {
-  const result = await evoFetch(`/api/v1/accounts/${EVO_ACCOUNT_ID}/conversations/${conversationId}/messages`, {
+  const result = await evoFetch(`/api/v1/conversations/${conversationId}/messages`, {
     method: 'POST',
     body: JSON.stringify(compactObject({
       content: msg.content,

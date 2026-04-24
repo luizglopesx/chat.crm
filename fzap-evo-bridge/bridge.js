@@ -1,11 +1,14 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-refetch-conv';
+const VERSION = 'bridge-2026-04-24-agent-api';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
 const EVO_API_TOKEN = process.env.EVO_API_TOKEN || '';
+const EVO_ACCOUNT_ID = Number(process.env.EVO_ACCOUNT_ID || '1');
+const EVO_INBOX_ID_ENV = process.env.EVO_INBOX_ID ? Number(process.env.EVO_INBOX_ID) : 0;
 const EVO_INBOX_IDENTIFIER = process.env.EVO_INBOX_IDENTIFIER || 'fzap_whatsapp';
+const EVO_INBOX_NAME = process.env.EVO_INBOX_NAME || 'FZAP WhatsApp';
 const WUZAPI_BASE_URL = (process.env.WUZAPI_BASE_URL || 'https://wuzapi.senhorcolchao.com').replace(/\/$/, '');
 const CHANNELS = JSON.parse(process.env.FZAP_CHANNELS_JSON || '{}');
 
@@ -355,66 +358,81 @@ async function evoFetch(path, options = {}) {
   return body;
 }
 
-async function ensureContact(msg) {
-  const encoded = encodeURIComponent(msg.sourceId);
-  const payload = {
-    source_id: msg.sourceId,
-    identifier: msg.sourceId,
-    name: msg.name,
-    phone_number: `+${msg.phone}`,
-    custom_attributes: {
-      fzap_channel: msg.channelLabel,
-      fzap_channel_key: msg.channelKey,
-      fzap_phone: msg.phone
-    }
-  };
+let resolvedInboxId = EVO_INBOX_ID_ENV || 0;
+let inboxResolutionPromise = null;
 
-  try {
-    await evoFetch(`/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts/${encoded}`, { method: 'GET' });
-    await evoFetch(`/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts/${encoded}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload)
-    });
-  } catch (err) {
-    if (err.status !== 404) throw err;
-    await evoFetch(`/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts`, {
-      method: 'POST',
-      body: JSON.stringify(payload)
-    });
+async function resolveInboxId() {
+  if (resolvedInboxId) return resolvedInboxId;
+  if (!inboxResolutionPromise) {
+    inboxResolutionPromise = (async () => {
+      const resp = await evoFetch(`/api/v1/accounts/${EVO_ACCOUNT_ID}/inboxes`);
+      const items = Array.isArray(resp?.payload) ? resp.payload
+        : Array.isArray(resp?.data?.payload) ? resp.data.payload
+        : Array.isArray(resp?.data) ? resp.data
+        : Array.isArray(resp) ? resp
+        : [];
+      const match = items.find(i => i?.inbox_identifier === EVO_INBOX_IDENTIFIER)
+        || items.find(i => i?.name === EVO_INBOX_NAME)
+        || items.find(i => String(i?.name || '').toLowerCase() === String(EVO_INBOX_NAME).toLowerCase());
+      if (!match?.id) {
+        inboxResolutionPromise = null;
+        throw new Error(`inbox not found (identifier="${EVO_INBOX_IDENTIFIER}" name="${EVO_INBOX_NAME}")`);
+      }
+      resolvedInboxId = match.id;
+      log('info', 'inbox resolved', { id: resolvedInboxId, name: match.name, identifier: match.inbox_identifier });
+      return resolvedInboxId;
+    })();
   }
+  return inboxResolutionPromise;
 }
 
-function pickConversation(payload) {
-  const arr = Array.isArray(payload?.data?.payload) ? payload.data.payload
-    : Array.isArray(payload?.payload) ? payload.payload
-    : Array.isArray(payload?.data) ? payload.data
-    : Array.isArray(payload) ? payload
+async function findContactBySourceId(sourceId, phone) {
+  const q = encodeURIComponent(phone);
+  const resp = await evoFetch(
+    `/api/v1/accounts/${EVO_ACCOUNT_ID}/contacts/search?q=${q}&include=contact_inboxes`
+  ).catch(err => { if (err.status === 404) return { payload: [] }; throw err; });
+  const items = Array.isArray(resp?.payload) ? resp.payload
+    : Array.isArray(resp?.data?.payload) ? resp.data.payload
+    : Array.isArray(resp?.data) ? resp.data
     : [];
-  if (!arr.length) return null;
-  return arr.find(c => c && c.status === 'open') || arr[arr.length - 1];
+  for (const contact of items) {
+    const ci = (contact.contact_inboxes || []).find(c => c.source_id === sourceId);
+    if (ci) return { contactId: contact.id, contactInboxId: ci.id, sourceId: ci.source_id };
+  }
+  const byPhone = items.find(c => digitsOnly(c.phone_number) === phone);
+  if (byPhone) return { contactId: byPhone.id, contactInboxId: null, sourceId: null };
+  return null;
 }
 
-async function listContactConversations(encoded) {
-  return evoFetch(`/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts/${encoded}/conversations`, {
-    method: 'GET'
-  }).catch(err => {
-    if (err.status === 404) return { data: [] };
-    throw err;
+async function createContactInbox(contactId, sourceId, inboxId) {
+  const resp = await evoFetch(`/api/v1/accounts/${EVO_ACCOUNT_ID}/contacts/${contactId}/contact_inboxes`, {
+    method: 'POST',
+    body: JSON.stringify({ inbox_id: inboxId, source_id: sourceId })
   });
+  const data = resp?.payload || resp?.data || resp;
+  return { contactInboxId: data?.id, sourceId: data?.source_id || sourceId };
 }
 
-async function getOrCreateConversation(msg) {
-  const encoded = encodeURIComponent(msg.sourceId);
-  const list = await listContactConversations(encoded);
-  const existing = pickConversation(list);
-  if (existing) {
-    log('info', 'conversation found', { id: existing.id, display_id: existing.display_id, status: existing.status });
-    return { id: existing.id, displayId: existing.display_id };
+async function ensureContact(msg, inboxId) {
+  const existing = await findContactBySourceId(msg.sourceId, msg.phone);
+  if (existing?.contactInboxId) {
+    log('info', 'contact found', { contactId: existing.contactId, contactInboxId: existing.contactInboxId });
+    return existing;
+  }
+  if (existing?.contactId) {
+    const ci = await createContactInbox(existing.contactId, msg.sourceId, inboxId);
+    log('info', 'contact inbox created for existing contact', { contactId: existing.contactId, ...ci });
+    return { contactId: existing.contactId, ...ci };
   }
 
-  const created = await evoFetch(`/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts/${encoded}/conversations`, {
+  const created = await evoFetch(`/api/v1/accounts/${EVO_ACCOUNT_ID}/contacts`, {
     method: 'POST',
     body: JSON.stringify({
+      inbox_id: inboxId,
+      source_id: msg.sourceId,
+      name: msg.name,
+      phone_number: `+${msg.phone}`,
+      identifier: msg.sourceId,
       custom_attributes: {
         fzap_channel: msg.channelLabel,
         fzap_channel_key: msg.channelKey,
@@ -422,48 +440,71 @@ async function getOrCreateConversation(msg) {
       }
     })
   });
-  const createdData = created?.data || created;
-  let convo = { id: createdData?.id, displayId: createdData?.display_id };
-
-  if (!convo.id && !convo.displayId) {
-    log('warn', 'conversation create response had no id, refetching', {
-      raw: summarizePayload(created),
-      rawText: created?.__rawText,
-      status: created?.__status
-    });
-    const refetched = await listContactConversations(encoded);
-    const latest = pickConversation(refetched);
-    if (latest) {
-      convo = { id: latest.id, displayId: latest.display_id };
-    } else {
-      log('error', 'refetch also returned no conversation', { raw: summarizePayload(refetched) });
-    }
+  const data = created?.payload || created?.data || created;
+  const contact = data?.contact || data;
+  const contactInbox = data?.contact_inbox;
+  const result = {
+    contactId: contact?.id,
+    contactInboxId: contactInbox?.id,
+    sourceId: contactInbox?.source_id || msg.sourceId
+  };
+  log('info', 'contact created', result);
+  if (!result.contactId) throw new Error('contact create response missing id');
+  if (!result.contactInboxId) {
+    const ci = await createContactInbox(result.contactId, msg.sourceId, inboxId);
+    result.contactInboxId = ci.contactInboxId;
+    result.sourceId = ci.sourceId;
   }
-
-  log('info', 'conversation created', { ...convo, status: created?.__status });
-  return convo;
+  return result;
 }
 
-async function addIncomingMessage(msg, conversationRef) {
-  const encoded = encodeURIComponent(msg.sourceId);
-  const body = compactObject({ content: msg.content, echo_id: msg.echoId });
-  const tryIds = [conversationRef.id, conversationRef.displayId].filter(v => v !== undefined && v !== null && v !== '');
-  let lastErr;
-  for (const convId of tryIds) {
-    try {
-      const result = await evoFetch(
-        `/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts/${encoded}/conversations/${convId}/messages`,
-        { method: 'POST', body: JSON.stringify(body) }
-      );
-      log('info', 'message created', { convId, messageId: result?.id });
-      return result;
-    } catch (err) {
-      log('warn', 'message create failed, will try next id if available', { convId, status: err.status, body: err.body });
-      lastErr = err;
-      if (err.status !== 404) throw err;
-    }
+async function getOrCreateConversation(msg, ctx, inboxId) {
+  const list = await evoFetch(`/api/v1/accounts/${EVO_ACCOUNT_ID}/contacts/${ctx.contactId}/conversations`)
+    .catch(err => { if (err.status === 404) return { payload: [] }; throw err; });
+  const items = Array.isArray(list?.payload) ? list.payload
+    : Array.isArray(list?.data?.payload) ? list.data.payload
+    : Array.isArray(list?.data) ? list.data
+    : [];
+  const existing = items.find(c => c.inbox_id === inboxId && c.status === 'open')
+    || items.find(c => c.inbox_id === inboxId);
+  if (existing?.id) {
+    log('info', 'conversation found', { id: existing.id, status: existing.status });
+    return existing.id;
   }
-  throw lastErr || new Error('no conversation id available for message post');
+
+  const created = await evoFetch(`/api/v1/accounts/${EVO_ACCOUNT_ID}/conversations`, {
+    method: 'POST',
+    body: JSON.stringify({
+      source_id: msg.sourceId,
+      inbox_id: inboxId,
+      contact_id: ctx.contactId,
+      status: 'open',
+      custom_attributes: {
+        fzap_channel: msg.channelLabel,
+        fzap_channel_key: msg.channelKey,
+        fzap_phone: msg.phone
+      }
+    })
+  });
+  const data = created?.payload || created?.data || created;
+  const convId = data?.id || data?.conversation?.id;
+  log('info', 'conversation created', { id: convId, status: created?.__status });
+  if (!convId) throw new Error(`conversation create missing id, raw=${summarizePayload(created)}`);
+  return convId;
+}
+
+async function addIncomingMessage(msg, conversationId) {
+  const result = await evoFetch(`/api/v1/accounts/${EVO_ACCOUNT_ID}/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    body: JSON.stringify(compactObject({
+      content: msg.content,
+      message_type: 'incoming',
+      private: false,
+      echo_id: msg.echoId
+    }))
+  });
+  log('info', 'message created', { conversationId, messageId: result?.id });
+  return result;
 }
 
 function channelFromSource(sourceId) {
@@ -527,10 +568,11 @@ async function handleIncoming(req, res, channelKey) {
     log('info', 'incoming ignored', { channelKey, reason: msg.reason });
     return sendJson(res, 200, { ok: true, ignored: msg.reason });
   }
-  await ensureContact(msg);
-  const conversationId = await getOrCreateConversation(msg);
+  const inboxId = await resolveInboxId();
+  const contactCtx = await ensureContact(msg, inboxId);
+  const conversationId = await getOrCreateConversation(msg, contactCtx, inboxId);
   await addIncomingMessage(msg, conversationId);
-  log('info', 'incoming synced', { channelKey, phone: msg.phone, conversationId });
+  log('info', 'incoming synced', { channelKey, phone: msg.phone, conversationId, contactId: contactCtx.contactId });
   sendJson(res, 200, { ok: true, conversationId });
 }
 

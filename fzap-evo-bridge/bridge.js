@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-location-preview';
+const VERSION = 'bridge-2026-04-24-sync-external-from-me';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -13,6 +13,7 @@ const WUZAPI_BASE_URL = (process.env.WUZAPI_BASE_URL || 'https://wuzapi.senhorco
 const CHANNELS = JSON.parse(process.env.FZAP_CHANNELS_JSON || '{}');
 const INCOMING_DEDUPE_TTL_MS = 10 * 60 * 1000;
 const recentIncomingMessages = new Map();
+const recentBridgeOutboundIds = new Map();
 
 function log(level, message, data = {}) {
   console.log(JSON.stringify({ ts: new Date().toISOString(), level, message, ...data }));
@@ -130,6 +131,35 @@ function isOutgoingMessage(payload) {
   if (senderType.includes('agent') || senderType.includes('bot')) return true;
 
   return false;
+}
+
+function isBridgeSyncedOutgoing(payload) {
+  const attrs = payload.content_attributes || payload.additional_attributes || {};
+  return Boolean(attrs.fzap_synced_from_me || attrs.fzap_bridge_sync_only);
+}
+
+function cleanupTimedMap(map, ttlMs, now = Date.now()) {
+  for (const [key, ts] of map.entries()) {
+    if (now - ts > ttlMs) map.delete(key);
+  }
+}
+
+function markBridgeOutboundId(id) {
+  if (!id) return;
+  cleanupTimedMap(recentBridgeOutboundIds, INCOMING_DEDUPE_TTL_MS);
+  recentBridgeOutboundIds.set(String(id), Date.now());
+}
+
+function isBridgeOutboundId(id) {
+  if (!id) return false;
+  cleanupTimedMap(recentBridgeOutboundIds, INCOMING_DEDUPE_TTL_MS);
+  const text = String(id);
+  return recentBridgeOutboundIds.has(text) || text.startsWith('EVOCRM');
+}
+
+function outgoingWuzapiId(payload, suffix = '') {
+  const seed = String(payload.id || payload.echo_id || Date.now()).replace(/\W/g, '').slice(-24);
+  return `EVOCRM${seed}${suffix}`;
 }
 
 function asArray(value) {
@@ -427,7 +457,6 @@ async function parseIncoming(payload, channelKey) {
     'key.fromMe',
     'fromMe'
   ]));
-  if (fromMe) return { ignore: true, reason: 'from_me' };
 
   const rawChatJid = firstPath(payload, [
     'event.Info.Chat',
@@ -566,11 +595,17 @@ async function parseIncoming(payload, channelKey) {
     'id'
   ]) || `${channelKey}-${Date.now()}`);
 
+  if (fromMe && isBridgeOutboundId(echoId)) {
+    return { ignore: true, reason: 'from_me_bridge_echo' };
+  }
+
   return {
     phone,
     sourceId,
     name: String(pushName),
     content,
+    fromMe,
+    messageType: fromMe ? 'outgoing' : 'incoming',
     mediaUrl,
     mediaKind,
     mediaFileName: mediaUrl ? incomingMediaFileName(payload, mediaUrl, mediaKind) : '',
@@ -582,9 +617,7 @@ async function parseIncoming(payload, channelKey) {
 }
 
 function cleanupIncomingDedupe(now = Date.now()) {
-  for (const [key, ts] of recentIncomingMessages.entries()) {
-    if (now - ts > INCOMING_DEDUPE_TTL_MS) recentIncomingMessages.delete(key);
-  }
+  cleanupTimedMap(recentIncomingMessages, INCOMING_DEDUPE_TTL_MS, now);
 }
 
 function markIncomingMessage(msg) {
@@ -821,9 +854,15 @@ async function addIncomingMessage(msg, conversationId) {
     method: 'POST',
     body: JSON.stringify(compactObject({
       content: msg.content,
-      message_type: 'incoming',
+      message_type: msg.messageType || 'incoming',
       private: false,
-      echo_id: msg.echoId
+      echo_id: msg.echoId,
+      content_attributes: compactObject({
+        fzap_echo_id: msg.echoId,
+        fzap_channel_key: msg.channelKey,
+        fzap_synced_from_me: msg.fromMe || undefined,
+        fzap_bridge_sync_only: msg.fromMe || undefined
+      })
     }))
   });
   log('info', 'message created', { conversationId, messageId: result?.id });
@@ -906,9 +945,15 @@ async function addIncomingLocationMessage(msg, conversationId) {
   const svg = await buildLocationMapSvg(msg.location);
   const form = new FormData();
   form.append('content', msg.content);
-  form.append('message_type', 'incoming');
+  form.append('message_type', msg.messageType || 'incoming');
   form.append('private', 'false');
   form.append('echo_id', msg.echoId);
+  form.append('content_attributes', JSON.stringify(compactObject({
+    fzap_echo_id: msg.echoId,
+    fzap_channel_key: msg.channelKey,
+    fzap_synced_from_me: msg.fromMe || undefined,
+    fzap_bridge_sync_only: msg.fromMe || undefined
+  })));
   form.append('attachments[]', new Blob([svg], { type: 'image/svg+xml' }), `localizacao-${msg.echoId || Date.now()}.svg`);
 
   const result = await evoFetchForm(`/api/v1/conversations/${conversationId}/messages`, form);
@@ -950,9 +995,15 @@ async function addIncomingMediaMessage(msg, conversationId) {
   const media = await downloadIncomingMedia(msg);
   const form = new FormData();
   form.append('content', msg.content);
-  form.append('message_type', 'incoming');
+  form.append('message_type', msg.messageType || 'incoming');
   form.append('private', 'false');
   form.append('echo_id', msg.echoId);
+  form.append('content_attributes', JSON.stringify(compactObject({
+    fzap_echo_id: msg.echoId,
+    fzap_channel_key: msg.channelKey,
+    fzap_synced_from_me: msg.fromMe || undefined,
+    fzap_bridge_sync_only: msg.fromMe || undefined
+  })));
   form.append('attachments[]', media.blob, media.fileName);
 
   const result = await evoFetchForm(`/api/v1/conversations/${conversationId}/messages`, form);
@@ -1000,20 +1051,24 @@ async function wuzapiFetch(path, channel, body) {
   return parsed;
 }
 
-async function sendTextToWuzapi(channel, phone, content) {
+async function sendTextToWuzapi(channel, phone, content, id) {
   if (!content) return { ignored: 'empty_text' };
+  markBridgeOutboundId(id);
   const response = await wuzapiFetch('/chat/send/text', channel, {
     phone,
     body: content,
+    id,
     check: true,
     linkPreview: true
   });
   return { type: 'text', response };
 }
 
-async function sendLocationToWuzapi(channel, phone, location) {
+async function sendLocationToWuzapi(channel, phone, location, id) {
+  markBridgeOutboundId(id);
   const response = await wuzapiFetch('/chat/send/location', channel, compactObject({
     phone,
+    id,
     latitude: location.latitude,
     longitude: location.longitude,
     name: location.name,
@@ -1024,9 +1079,11 @@ async function sendLocationToWuzapi(channel, phone, location) {
   return { type: 'location', response };
 }
 
-async function sendContactToWuzapi(channel, phone, contact) {
+async function sendContactToWuzapi(channel, phone, contact, id) {
+  markBridgeOutboundId(id);
   const response = await wuzapiFetch('/chat/send/contact', channel, {
     phone,
+    id,
     name: contact.name,
     vcard: contact.vcard,
     check: true
@@ -1034,9 +1091,10 @@ async function sendContactToWuzapi(channel, phone, contact) {
   return { type: 'contact', response };
 }
 
-async function sendAttachmentToWuzapi(channel, phone, attachment, caption = '') {
+async function sendAttachmentToWuzapi(channel, phone, attachment, caption = '', id = '') {
   const url = attachmentUrl(attachment);
   if (!url) return { ignored: 'attachment_no_url', attachment: summarizePayload(attachment) };
+  markBridgeOutboundId(id);
 
   const type = attachmentType(attachment);
   const fileName = attachmentName(attachment, url);
@@ -1046,6 +1104,7 @@ async function sendAttachmentToWuzapi(channel, phone, attachment, caption = '') 
     caption,
     fileName,
     mimeType,
+    id,
     check: true
   });
 
@@ -1068,6 +1127,7 @@ async function sendAttachmentToWuzapi(channel, phone, attachment, caption = '') 
   if (type === 'sticker') {
     const response = await wuzapiFetch('/chat/send/sticker', channel, compactObject({
       phone,
+      id,
       sticker: url,
       mimeType: mimeType || 'image/webp',
       check: true
@@ -1083,6 +1143,10 @@ async function sendToWuzapi(payload) {
   if (payload.event !== 'message_created') {
     log('info', 'outgoing ignored', { reason: 'event', event: payload.event });
     return { ignored: 'event' };
+  }
+  if (isBridgeSyncedOutgoing(payload)) {
+    log('info', 'outgoing ignored', { reason: 'bridge_sync_only', messageId: payload.id });
+    return { ignored: 'bridge_sync_only' };
   }
   if (!isOutgoingMessage(payload)) {
     log('info', 'outgoing ignored', {
@@ -1109,17 +1173,18 @@ async function sendToWuzapi(payload) {
   const location = outgoingLocation(payload);
   const contact = outgoingContact(payload);
   const attachments = outgoingAttachments(payload);
+  const baseWuzapiId = outgoingWuzapiId(payload);
   const results = [];
 
-  if (location) results.push(await sendLocationToWuzapi(channel, phone, location));
-  if (contact) results.push(await sendContactToWuzapi(channel, phone, contact));
+  if (location) results.push(await sendLocationToWuzapi(channel, phone, location, baseWuzapiId));
+  if (contact) results.push(await sendContactToWuzapi(channel, phone, contact, baseWuzapiId));
 
   if (attachments.length) {
     for (const [index, attachment] of attachments.entries()) {
-      results.push(await sendAttachmentToWuzapi(channel, phone, attachment, index === 0 ? content : ''));
+      results.push(await sendAttachmentToWuzapi(channel, phone, attachment, index === 0 ? content : '', `${baseWuzapiId}${index}`));
     }
   } else if (!location && !contact && content) {
-    results.push(await sendTextToWuzapi(channel, phone, content));
+    results.push(await sendTextToWuzapi(channel, phone, content, baseWuzapiId));
   }
 
   if (!results.length) return { ignored: 'empty_content' };

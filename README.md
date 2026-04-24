@@ -98,6 +98,7 @@ Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api-accountl
 
 - Texto entrante (WhatsApp → EvoCRM): suportado via Agent API.
 - Deduplicação de mensagens entrantes: a bridge ignora o mesmo `echo_id`/ID de mensagem da Wuzapi por 10 minutos para evitar duplicidade quando o webhook é reenviado.
+- Automações externas via Wuzapi/FZAP: mensagens `from_me` que não foram enviadas pela própria bridge são sincronizadas no EvoCRM como mensagens de saída, para aparecerem na timeline sem reenviar para o WhatsApp.
 - Texto sainte (EvoCRM/Agente de IA → WhatsApp): suportado via `/chat/send/text` da Wuzapi; HTML do editor rico é convertido para texto limpo antes do envio.
 - Anexos saindo do EvoCRM para WhatsApp: imagem, áudio, vídeo, documento e sticker são encaminhados para os endpoints específicos da Wuzapi quando o webhook do EvoCRM envia `attachments` com URL pública.
 - Contato/vCard e localização saindo do EvoCRM para WhatsApp: suportados quando o webhook traz `content_attributes` com `vcard` ou coordenadas.
@@ -109,6 +110,6 @@ Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api-accountl
 
 - ✅ Automação commit → deploy (GitHub Actions + GHCR + Portainer webhook)
 - ✅ Contatos e conversas sendo criados no EvoCRM (via Agent API)
-- ⏳ Confirmar localização renderizada com `bridge-2026-04-24-location-preview`
+- ⏳ Confirmar automações externas na timeline com `bridge-2026-04-24-sync-external-from-me`
 - ⏳ Validar sticker, vCard e localização com payload real
 - ⏳ Conversas antigas vazias no CRM: não preenchem retroativamente; limpar manualmente

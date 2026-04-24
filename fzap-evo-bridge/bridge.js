@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-automation-webhooks';
+const VERSION = 'bridge-2026-04-24-automation-diagnostics';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -13,11 +13,16 @@ const EVO_INBOX_NAME = process.env.EVO_INBOX_NAME || 'FZAP WhatsApp';
 const WUZAPI_BASE_URL = (process.env.WUZAPI_BASE_URL || 'https://wuzapi.senhorcolchao.com').replace(/\/$/, '');
 const CHANNELS = JSON.parse(process.env.FZAP_CHANNELS_JSON || '{}');
 const INCOMING_DEDUPE_TTL_MS = 10 * 60 * 1000;
+const WUZAPI_WEBHOOK_SYNC_INTERVAL_MS = Number(process.env.WUZAPI_WEBHOOK_SYNC_INTERVAL_MS || 5 * 60 * 1000);
 const recentIncomingMessages = new Map();
 const recentBridgeOutboundIds = new Map();
+const recentDiagnostics = [];
 
 function log(level, message, data = {}) {
-  console.log(JSON.stringify({ ts: new Date().toISOString(), level, message, ...data }));
+  const entry = { ts: new Date().toISOString(), level, message, ...data };
+  recentDiagnostics.push(entry);
+  while (recentDiagnostics.length > 200) recentDiagnostics.shift();
+  console.log(JSON.stringify(entry));
 }
 
 function sendJson(res, status, body) {
@@ -1481,9 +1486,23 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
     if (url.pathname === '/health' || url.pathname === '/fzap/health') {
-      return sendJson(res, 200, { ok: true });
+      return sendJson(res, 200, {
+        ok: true,
+        version: VERSION,
+        channels: Object.keys(CHANNELS),
+        webhookSyncIntervalMs: WUZAPI_WEBHOOK_SYNC_INTERVAL_MS
+      });
     }
     if (SECRET && url.searchParams.get('secret') !== SECRET) return sendJson(res, 401, { ok: false, error: 'unauthorized' });
+
+    if (req.method === 'GET' && url.pathname === '/fzap/debug') {
+      return sendJson(res, 200, {
+        ok: true,
+        version: VERSION,
+        channels: Object.keys(CHANNELS),
+        recent: recentDiagnostics.slice(-80)
+      });
+    }
 
     const incomingMatch = url.pathname.match(/^\/fzap\/webhook\/([^/]+)$/);
     if (req.method === 'POST' && incomingMatch) return await handleIncoming(req, res, incomingMatch[1]);
@@ -1501,4 +1520,11 @@ server.listen(PORT, () => {
   ensureAllWuzapiWebhooks().catch((err) => {
     log('warn', 'wuzapi webhook auto config failed', { error: err.message, stack: err.stack });
   });
+  if (WUZAPI_WEBHOOK_SYNC_INTERVAL_MS > 0) {
+    setInterval(() => {
+      ensureAllWuzapiWebhooks().catch((err) => {
+        log('warn', 'wuzapi webhook periodic sync failed', { error: err.message, stack: err.stack });
+      });
+    }, WUZAPI_WEBHOOK_SYNC_INTERVAL_MS).unref();
+  }
 });

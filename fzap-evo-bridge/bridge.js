@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-agent-api-accountless';
+const VERSION = 'bridge-2026-04-24-outgoing-cleanup';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -90,6 +90,43 @@ function summarizePayload(payload) {
   } catch {
     return String(payload);
   }
+}
+
+function decodeHtmlEntities(text) {
+  return String(text || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
+}
+
+function normalizeOutgoingContent(value) {
+  let text = String(value || '');
+  text = text
+    .replace(/<\s*br\s*\/?>/gi, '\n')
+    .replace(/<\s*\/p\s*>\s*<\s*p[^>]*>/gi, '\n\n')
+    .replace(/<\s*\/?(p|div|li|ul|ol|blockquote|h[1-6])[^>]*>/gi, '\n')
+    .replace(/<[^>]*>/g, '');
+  text = decodeHtmlEntities(text);
+  text = text
+    .replace(/\*\*([^*\n][\s\S]*?[^*\n])\*\*/g, '*$1*')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return text;
+}
+
+function isOutgoingMessage(payload) {
+  const type = String(payload.message_type ?? '').toLowerCase();
+  if (['incoming', '0'].includes(type)) return false;
+  if (['outgoing', 'template', '1', '3'].includes(type)) return true;
+
+  const senderType = String(payload.sender?.type || payload.sender_type || '').toLowerCase();
+  if (senderType.includes('agent') || senderType.includes('bot')) return true;
+
+  return false;
 }
 
 function normalizeJidValue(value) {
@@ -519,9 +556,22 @@ function phoneFromSource(sourceId, sender) {
 }
 
 async function sendToWuzapi(payload) {
-  if (payload.event !== 'message_created') return { ignored: 'event' };
-  if (!['outgoing', 'template'].includes(String(payload.message_type))) return { ignored: 'message_type' };
-  if (payload.private) return { ignored: 'private' };
+  if (payload.event !== 'message_created') {
+    log('info', 'outgoing ignored', { reason: 'event', event: payload.event });
+    return { ignored: 'event' };
+  }
+  if (!isOutgoingMessage(payload)) {
+    log('info', 'outgoing ignored', {
+      reason: 'message_type',
+      messageType: payload.message_type,
+      senderType: payload.sender?.type || payload.sender_type
+    });
+    return { ignored: 'message_type' };
+  }
+  if (payload.private) {
+    log('info', 'outgoing ignored', { reason: 'private', messageType: payload.message_type });
+    return { ignored: 'private' };
+  }
 
   const sourceId = payload?.conversation?.contact_inbox?.source_id || payload.source_id || '';
   const channelKey = payload?.conversation?.custom_attributes?.fzap_channel_key || channelFromSource(sourceId);
@@ -531,7 +581,7 @@ async function sendToWuzapi(payload) {
   const phone = phoneFromSource(sourceId, payload.sender || payload?.conversation?.meta?.sender);
   if (!phone) throw new Error('missing destination phone');
 
-  const content = String(payload.content || '').trim();
+  const content = normalizeOutgoingContent(payload.content);
   if (!content) return { ignored: 'empty_content' };
 
   const response = await fetch(`${WUZAPI_BASE_URL}/chat/send/text`, {

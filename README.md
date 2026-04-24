@@ -96,7 +96,7 @@ Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api-accountl
 ## Escopo atual
 
 - Texto entrante (WhatsApp → EvoCRM): suportado via Agent API.
-- Texto sainte (EvoCRM → WhatsApp): suportado via `/chat/send/text` da Wuzapi.
+- Texto sainte (EvoCRM/Agente de IA → WhatsApp): suportado via `/chat/send/text` da Wuzapi; HTML do editor rico é convertido para texto limpo antes do envio.
 - LID da FZAP: tenta campos `SenderPN`/`SenderAlt`/`ChatAlt` antes de cair no reverseLid.
 - Mídia/áudio/documento: fallback como `[midia recebida] <url>` quando a Wuzapi envia URL no webhook; sem upload direto ao EvoCRM ainda.
 
@@ -104,6 +104,6 @@ Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api-accountl
 
 - ✅ Automação commit → deploy (GitHub Actions + GHCR + Portainer webhook)
 - ✅ Contatos e conversas sendo criados no EvoCRM (via Agent API)
-- ⏳ Confirmar que mensagens entrantes aparecem na timeline com `bridge-2026-04-24-agent-api-accountless`
+- ⏳ Confirmar que mensagens entrantes aparecem na timeline com `bridge-2026-04-24-outgoing-cleanup`
 - ⏳ Mídia/áudio/documentos: upload via `attachments` do EvoCRM em vez de só o link
 - ⏳ Conversas antigas vazias no CRM: não preenchem retroativamente; limpar manualmente

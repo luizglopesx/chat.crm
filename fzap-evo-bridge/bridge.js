@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-public-api';
+const VERSION = 'bridge-2026-04-24-msg-id-fallback';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -331,6 +331,7 @@ async function evoFetch(path, options = {}) {
     'api_access_token': EVO_API_TOKEN,
     ...(options.headers || {})
   };
+  const method = options.method || 'GET';
   const response = await fetch(`${EVO_BASE_URL}${path}`, { ...options, headers });
   const text = await response.text();
   let body;
@@ -340,9 +341,11 @@ async function evoFetch(path, options = {}) {
     body = { raw: text };
   }
   if (!response.ok) {
-    const err = new Error(`EvoCRM ${response.status}`);
+    const err = new Error(`EvoCRM ${response.status} ${method} ${path}`);
     err.status = response.status;
     err.body = body;
+    err.path = path;
+    err.method = method;
     throw err;
   }
   return body;
@@ -388,7 +391,10 @@ async function getOrCreateConversation(msg) {
 
   const conversations = Array.isArray(list.data) ? list.data : Array.isArray(list) ? list : [];
   const existing = conversations.find(c => c.status === 'open') || conversations[0];
-  if (existing) return existing.display_id || existing.id;
+  if (existing) {
+    log('info', 'conversation found', { id: existing.id, display_id: existing.display_id, status: existing.status });
+    return { id: existing.id, displayId: existing.display_id };
+  }
 
   const created = await evoFetch(`/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts/${encoded}/conversations`, {
     method: 'POST',
@@ -401,18 +407,30 @@ async function getOrCreateConversation(msg) {
     })
   });
   const data = created.data || created;
-  return data.display_id || data.id;
+  log('info', 'conversation created', { id: data.id, display_id: data.display_id, raw: summarizePayload(created) });
+  return { id: data.id, displayId: data.display_id };
 }
 
-async function addIncomingMessage(msg, conversationId) {
+async function addIncomingMessage(msg, conversationRef) {
   const encoded = encodeURIComponent(msg.sourceId);
-  return evoFetch(`/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts/${encoded}/conversations/${conversationId}/messages`, {
-    method: 'POST',
-    body: JSON.stringify(compactObject({
-      content: msg.content,
-      echo_id: msg.echoId
-    }))
-  });
+  const body = compactObject({ content: msg.content, echo_id: msg.echoId });
+  const tryIds = [conversationRef.id, conversationRef.displayId].filter(v => v !== undefined && v !== null && v !== '');
+  let lastErr;
+  for (const convId of tryIds) {
+    try {
+      const result = await evoFetch(
+        `/public/api/v1/inboxes/${EVO_INBOX_IDENTIFIER}/contacts/${encoded}/conversations/${convId}/messages`,
+        { method: 'POST', body: JSON.stringify(body) }
+      );
+      log('info', 'message created', { convId, messageId: result?.id });
+      return result;
+    } catch (err) {
+      log('warn', 'message create failed, will try next id if available', { convId, status: err.status, body: err.body });
+      lastErr = err;
+      if (err.status !== 404) throw err;
+    }
+  }
+  throw lastErr || new Error('no conversation id available for message post');
 }
 
 function channelFromSource(sourceId) {

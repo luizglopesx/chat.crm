@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-strip-internal-attrs';
+const VERSION = 'bridge-2026-04-25-live-external-from-me';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -1032,8 +1032,12 @@ async function addIncomingMessage(msg, conversationId) {
   const payload = compactObject({
     content: msg.content,
     message_type: msg.messageType || 'incoming',
+    content_type: 'text',
     private: false,
-    echo_id: msg.echoId
+    source_id: msg.echoId,
+    // EvoCRM frontend treats outgoing + echo_id as an optimistic local echo.
+    // External fromMe messages have no local placeholder, so keep their ID only in source_id.
+    echo_id: msg.fromMe ? '' : msg.echoId
   });
   const result = await evoFetch(`/api/v1/conversations/${conversationId}/messages`, {
     method: 'POST',
@@ -1045,6 +1049,8 @@ async function addIncomingMessage(msg, conversationId) {
     messageId,
     messageType: payload.message_type,
     fromMe: Boolean(msg.fromMe),
+    sourceId: payload.source_id,
+    echoId: payload.echo_id,
     status: result?.__status,
     responseKeys: result ? Object.keys(result).slice(0, 20).join(',') : 'null',
     responseSnippet: summarizePayload(result)
@@ -1130,8 +1136,10 @@ async function addIncomingLocationMessage(msg, conversationId) {
   const form = new FormData();
   form.append('content', msg.content);
   form.append('message_type', msg.messageType || 'incoming');
+  form.append('content_type', 'text');
   form.append('private', 'false');
-  form.append('echo_id', msg.echoId);
+  form.append('source_id', msg.echoId);
+  if (!msg.fromMe) form.append('echo_id', msg.echoId);
   form.append('attachments[]', new Blob([svg], { type: 'image/svg+xml' }), `localizacao-${msg.echoId || Date.now()}.svg`);
 
   const result = await evoFetchForm(`/api/v1/conversations/${conversationId}/messages`, form);
@@ -1175,8 +1183,10 @@ async function addIncomingMediaMessage(msg, conversationId) {
   const form = new FormData();
   form.append('content', msg.content);
   form.append('message_type', msg.messageType || 'incoming');
+  form.append('content_type', 'text');
   form.append('private', 'false');
-  form.append('echo_id', msg.echoId);
+  form.append('source_id', msg.echoId);
+  if (!msg.fromMe) form.append('echo_id', msg.echoId);
   form.append('attachments[]', media.blob, media.fileName);
 
   const result = await evoFetchForm(`/api/v1/conversations/${conversationId}/messages`, form);

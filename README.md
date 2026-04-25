@@ -95,15 +95,21 @@ Feita uma vez, nunca mais precisa:
 
 ## Debug
 
-Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api-accountless`). Em caso de erro, o log traz a URL e método que falharam (`EvoCRM 404 GET /api/v1/...`), além de snippets do payload FZAP quando a extração de telefone falha.
+Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-25-strip-internal-attrs`). Em caso de erro, o log traz a URL e método que falharam (`EvoCRM 404 GET /api/v1/...`), além de snippets do payload FZAP quando a extração de telefone falha.
+
+O endpoint `GET /fzap/debug?secret=...` devolve os últimos ~80 eventos da bridge em memória (entradas, saídas, ignorados, erros) — útil pra diagnosticar sem precisar abrir o container no Portainer.
+
+Nas criações de mensagem no EvoCRM, o log `message created` agora traz `messageId`, `messageType`, `fromMe`, `status`, `responseKeys` e `responseSnippet`, então dá pra ver exatamente o que o EvoCRM devolveu se a mensagem não aparecer na UI.
 
 ## Escopo atual
 
 - Texto entrante (WhatsApp → EvoCRM): suportado via Agent API.
 - Deduplicação de mensagens entrantes: a bridge ignora o mesmo `echo_id`/ID de mensagem da Wuzapi por 10 minutos para evitar duplicidade quando o webhook é reenviado.
 - Automações externas via Wuzapi/FZAP: mensagens `from_me` que não foram enviadas pela própria bridge são sincronizadas no EvoCRM como mensagens de saída, para aparecerem na timeline sem reenviar para o WhatsApp.
+  - Para `fromMe=true`, a bridge extrai o telefone apenas do destinatário (`Chat`/`RecipientAlt`), nunca do `Sender` (que é o próprio canal); se vier só LID, tenta `reverseLid` em todos os candidatos antes de desistir.
+  - Para evitar loop quando o EvoCRM dispara o webhook outgoing dessa mensagem sintética, a bridge mantém os `echoId` das mensagens fromMe externas em memória (`recentExternalFromMeIds`, TTL 10min) e cruza com `source_id`/`echo_id`/`id` do webhook outgoing.
 - Eventos `AutomationMessage` da Wuzapi/FZAP: tratados como mensagens normais; quando ignorados, o log inclui `eventName`, `fromMe` e snippet do payload para depuração.
-- Webhooks da Wuzapi/FZAP: no startup e periodicamente, a bridge cria/atualiza seus próprios webhooks `All` e `AutomationMessage` para cada canal configurado, sem apagar webhooks de outros sistemas como o Campaign Manager.
+- Webhooks da Wuzapi/FZAP: no startup e periodicamente, a bridge cria/atualiza seus próprios webhooks `All` e `AutomationMessage` para cada canal configurado, sem apagar webhooks de outros sistemas como o Campaign Manager. As chamadas usam apenas `token` minúsculo (e `instance` quando configurado) — duplicar para `Token` faz o `fetch` do Node concatenar os valores com vírgula e a Wuzapi rejeita por auth inválida.
 - Texto sainte (EvoCRM/Agente de IA → WhatsApp): suportado via `/chat/send/text` da Wuzapi; HTML do editor rico é convertido para texto limpo antes do envio.
 - Anexos saindo do EvoCRM para WhatsApp: imagem, áudio, vídeo, documento e sticker são encaminhados para os endpoints específicos da Wuzapi quando o webhook do EvoCRM envia `attachments` com URL pública.
 - Contato/vCard e localização saindo do EvoCRM para WhatsApp: suportados quando o webhook traz `content_attributes` com `vcard` ou coordenadas.
@@ -115,6 +121,14 @@ Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-24-agent-api-accountl
 
 - ✅ Automação commit → deploy (GitHub Actions + GHCR + Portainer webhook)
 - ✅ Contatos e conversas sendo criados no EvoCRM (via Agent API)
-- ⏳ Confirmar automações externas na timeline com `bridge-2026-04-24-automation-debug`
+- ✅ Mensagens saindo do CRM para o WhatsApp (regressão dos headers Wuzapi corrigida em `bridge-2026-04-25-fix-wuzapi-headers`)
+- ✅ Automações externas chegando no EvoCRM como mensagens outgoing (`bridge-2026-04-25-fix-from-me-phone` consertou a extração de telefone que pegava o número do canal; `bridge-2026-04-25-strip-internal-attrs` removeu flags em `content_attributes` que o EvoCRM usava para esconder a mensagem da UI, movendo o dedup para memória)
 - ⏳ Validar sticker, vCard e localização com payload real
+- ⏳ 500 esporádico em `POST /api/v1/conversations` para alguns clientes válidos: a bridge cria `contact_inbox` mas o EvoCRM rejeita criar a conversa (provavelmente já existe `open` que `/contacts/{id}/conversations` não retorna). Não bloqueia a maioria dos casos
 - ⏳ Conversas antigas vazias no CRM: não preenchem retroativamente; limpar manualmente
+
+### Regressões resolvidas em 2026-04-25
+
+- **Mensagens do CRM não chegavam ao cliente** — `wuzapiHeaders` estava emitindo `token` *e* `Token` (e `instance`/`Instance`); o `fetch` do Node concatenava com vírgula e a Wuzapi rejeitava por auth inválida. Removida a duplicata.
+- **Automação criava conversa "canal pra ele mesmo"** com erro 500 no EvoCRM — para `fromMe=true`, o loop de candidatos caía no `Sender` (número do canal) quando o `Chat` vinha em formato LID. Restringida a lista de candidatos a `recipientAltJid` e `rawChatJid`, e o fallback de LID agora itera todos antes de desistir.
+- **Mensagens da automação não apareciam na UI do CRM** mesmo com a bridge logando `message created` — o EvoCRM aceitava o POST mas o `id` voltava `undefined`. Suspeita: hook interno escondia mensagens com `content_attributes.fzap_synced_from_me`/`fzap_bridge_sync_only`. Flags removidas; dedup migrou para mapa em memória (`recentExternalFromMeIds`).

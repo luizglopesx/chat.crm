@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-source-conversation-fallback';
+const VERSION = 'bridge-2026-04-25-reopen-source-conversation';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -978,6 +978,7 @@ async function getOrCreateConversation(msg, ctx, inboxId) {
     || items.find(c => c.inbox_id === inboxId);
   if (existing?.id) {
     log('info', 'conversation found', { id: existing.id, status: existing.status });
+    await ensureConversationOpen(existing.id, existing.status);
     return existing.id;
   }
 
@@ -1029,7 +1030,27 @@ async function findConversationBySourceId(sourceId, inboxId) {
     || items.find(c => c.inbox_id === inboxId);
   if (!existing?.id) return '';
   log('info', 'conversation found by source_id', { id: existing.id, status: existing.status, sourceId });
+  await ensureConversationOpen(existing.id, existing.status);
   return existing.id;
+}
+
+async function ensureConversationOpen(conversationId, status) {
+  if (!conversationId || status === 'open') return;
+  try {
+    const resp = await evoFetch(`/api/v1/conversations/${conversationId}/toggle_status`, {
+      method: 'POST',
+      body: JSON.stringify({ status: 'open' })
+    });
+    log('info', 'conversation reopened', { id: conversationId, previousStatus: status, responseStatus: resp?.__status });
+  } catch (err) {
+    log('warn', 'conversation reopen failed', {
+      id: conversationId,
+      previousStatus: status,
+      status: err.status,
+      body: err.body,
+      error: err.message
+    });
+  }
 }
 
 async function addIncomingMessage(msg, conversationId) {

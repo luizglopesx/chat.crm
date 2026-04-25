@@ -22,6 +22,7 @@ EvoCRM      -> fzap_evo_bridge -> FZAP/Wuzapi -> WhatsApp
 - `canal2`: numero `551733233694`
 
 Ambos caem no mesmo inbox `FZAP WhatsApp`; o canal vira `custom_attributes` no contato/conversa (`fzap_channel`, `fzap_channel_key`, `fzap_phone`).
+A bridge também aplica automaticamente uma etiqueta visível na conversa (`canal 1` ou `canal 2`) para diferenciar a origem na lista do EvoCRM.
 
 ## Endpoints da bridge
 
@@ -115,6 +116,7 @@ Nas criações de mensagem no EvoCRM, o log `message created` agora traz `messag
 - Eventos `AutomationMessage` da Wuzapi/FZAP: tratados como mensagens normais; quando ignorados, o log inclui `eventName`, `fromMe` e snippet do payload para depuração.
 - Eventos técnicos da Wuzapi/FZAP (`IdentityChange`, `ReadReceipt`, `StatusMessage`, presença/sync) são ignorados antes da extração de telefone, porque não carregam mensagem de chat para sincronizar.
 - Webhooks da Wuzapi/FZAP: no startup e periodicamente, a bridge cria/atualiza seus próprios webhooks `All` e `AutomationMessage` para cada canal configurado, sem apagar webhooks de outros sistemas como o Campaign Manager. As chamadas usam apenas `token` minúsculo (e `instance` quando configurado) — duplicar para `Token` faz o `fetch` do Node concatenar os valores com vírgula e a Wuzapi rejeita por auth inválida.
+- Identificação visual do canal no EvoCRM: ao sincronizar uma mensagem entrante, a bridge garante a existência das etiquetas `canal 1`/`canal 2` e aplica a etiqueta correspondente na conversa sem remover outras etiquetas existentes. O EvoCRM normaliza nomes de etiquetas para minúsculas.
 - Texto sainte (EvoCRM/Agente de IA → WhatsApp): suportado via `/chat/send/text` da Wuzapi; HTML do editor rico é convertido para texto limpo antes do envio.
 - Anexos saindo do EvoCRM para WhatsApp: imagem, áudio, vídeo, documento e sticker são encaminhados para os endpoints específicos da Wuzapi quando o webhook do EvoCRM envia `attachments` com URL pública.
 - Contato/vCard e localização saindo do EvoCRM para WhatsApp: suportados quando o webhook traz `content_attributes` com `vcard` ou coordenadas.

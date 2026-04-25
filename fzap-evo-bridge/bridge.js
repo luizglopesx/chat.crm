@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-public-conversation-fallback';
+const VERSION = 'bridge-2026-04-25-channel-labels';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -18,6 +18,7 @@ const recentIncomingMessages = new Map();
 const recentBridgeOutboundIds = new Map();
 const recentExternalFromMeIds = new Map();
 const recentDiagnostics = [];
+const labelCache = new Map();
 
 function log(level, message, data = {}) {
   const entry = { ts: new Date().toISOString(), level, message, ...data };
@@ -97,6 +98,10 @@ function getPath(obj, path) {
 
 function compactObject(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== null && item !== ''));
+}
+
+function normalizeLabelTitle(value) {
+  return String(value || '').trim().toLowerCase();
 }
 
 function firstPath(obj, paths) {
@@ -980,6 +985,115 @@ function responseItems(resp) {
     : [];
 }
 
+function channelLabelTitle(msg) {
+  return normalizeLabelTitle(msg.channelLabel || msg.channelKey);
+}
+
+function channelLabelColor(channelKey) {
+  const colors = {
+    canal1: '#00b894',
+    canal2: '#2f80ed'
+  };
+  return colors[channelKey] || '#1f93ff';
+}
+
+function responseData(resp) {
+  return resp?.payload || resp?.data || resp;
+}
+
+function labelTitle(label) {
+  if (typeof label === 'string') return normalizeLabelTitle(label);
+  return normalizeLabelTitle(label?.title || label?.name);
+}
+
+async function findLabelByTitle(title) {
+  const normalizedTitle = normalizeLabelTitle(title);
+  const resp = await evoFetch('/api/v1/labels?per_page=1000')
+    .catch(err => { if (err.status === 404) return { payload: [] }; throw err; });
+  const label = responseItems(resp).find(item => labelTitle(item) === normalizedTitle);
+  if (label) labelCache.set(normalizedTitle, label);
+  return label || null;
+}
+
+async function ensureLabel(title, color) {
+  const normalizedTitle = normalizeLabelTitle(title);
+  if (!normalizedTitle) return null;
+  if (labelCache.has(normalizedTitle)) return labelCache.get(normalizedTitle);
+
+  const existing = await findLabelByTitle(normalizedTitle);
+  if (existing) return existing;
+
+  try {
+    const created = await evoFetch('/api/v1/labels', {
+      method: 'POST',
+      body: JSON.stringify({
+        label: {
+          title: normalizedTitle,
+          color,
+          show_on_sidebar: true
+        }
+      })
+    });
+    const label = responseData(created);
+    labelCache.set(normalizedTitle, label);
+    log('info', 'channel label created', { title: normalizedTitle, color });
+    return label;
+  } catch (err) {
+    if (err.status === 422) {
+      const recovered = await findLabelByTitle(normalizedTitle);
+      if (recovered) return recovered;
+    }
+    throw err;
+  }
+}
+
+function currentConversationLabelTitles(resp) {
+  const direct = Array.isArray(resp?.labels) ? resp.labels
+    : Array.isArray(resp?.payload?.labels) ? resp.payload.labels
+    : Array.isArray(resp?.data?.labels) ? resp.data.labels
+    : responseItems(resp);
+  return direct.map(labelTitle).filter(Boolean);
+}
+
+async function fetchConversationLabelTitles(conversationId) {
+  const conversation = await evoFetch(`/api/v1/conversations/${conversationId}`)
+    .catch(err => {
+      if (err.status === 404) return {};
+      throw err;
+    });
+  const labels = currentConversationLabelTitles(conversation);
+  if (labels.length) return labels;
+
+  const labelResp = await evoFetch(`/api/v1/conversations/${conversationId}/labels`)
+    .catch(err => { if (err.status === 404) return { payload: [] }; throw err; });
+  return currentConversationLabelTitles(labelResp);
+}
+
+async function applyChannelLabel(conversationId, msg) {
+  const title = channelLabelTitle(msg);
+  if (!conversationId || !title) return;
+
+  try {
+    await ensureLabel(title, channelLabelColor(msg.channelKey));
+    const labels = [...new Set([...(await fetchConversationLabelTitles(conversationId)), title])];
+
+    await evoFetch(`/api/v1/conversations/${conversationId}/labels`, {
+      method: 'POST',
+      body: JSON.stringify({ labels })
+    });
+    log('info', 'channel label applied', { conversationId, channelKey: msg.channelKey, label: title });
+  } catch (err) {
+    log('warn', 'channel label apply failed', {
+      conversationId,
+      channelKey: msg.channelKey,
+      label: title,
+      status: err.status,
+      body: err.body,
+      error: err.message
+    });
+  }
+}
+
 async function ensureContact(msg, inboxId) {
   const existing = await findContactBySourceId(msg.sourceId, msg.phone);
   if (existing?.contactInboxId) {
@@ -1652,6 +1766,7 @@ async function handleIncoming(req, res, channelKey) {
     const inboxId = await resolveInboxId();
     const contactCtx = await ensureContact(msg, inboxId);
     const conversationId = await getOrCreateConversation(msg, contactCtx, inboxId);
+    await applyChannelLabel(conversationId, msg);
     await addIncomingMessage(msg, conversationId);
     log('info', 'incoming synced', {
       channelKey,

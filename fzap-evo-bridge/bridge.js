@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-fix-wuzapi-headers';
+const VERSION = 'bridge-2026-04-25-fix-from-me-phone';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -646,7 +646,7 @@ async function parseIncoming(payload, channelKey) {
   ]) || walkFind(payload, ['remoteJid', 'jid']);
 
   const candidates = (fromMe
-    ? [recipientAltJid, rawChatJid, senderAltJid, rawSenderJid]
+    ? [recipientAltJid, rawChatJid]
     : [senderAltJid, rawChatJid, rawSenderJid]
   ).filter(Boolean);
   let jidText = '';
@@ -655,12 +655,12 @@ async function parseIncoming(payload, channelKey) {
     if (text && !isLidJid(text)) { jidText = text; break; }
   }
   if (!jidText) {
-    const fallback = normalizeJidValue(candidates[0] || '');
-    if (isLidJid(fallback)) {
-      const resolved = await reverseLid(channelKey, fallback);
-      if (resolved) jidText = normalizeJidValue(resolved);
-    } else {
-      jidText = fallback;
+    for (const cand of candidates) {
+      const text = normalizeJidValue(cand);
+      if (text && isLidJid(text)) {
+        const resolved = await reverseLid(channelKey, text);
+        if (resolved) { jidText = normalizeJidValue(resolved); break; }
+      }
     }
   }
 

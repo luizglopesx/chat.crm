@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-live-external-from-me';
+const VERSION = 'bridge-2026-04-25-source-conversation-fallback';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -917,6 +917,14 @@ async function createContactInbox(contactId, sourceId, inboxId) {
   return { contactInboxId: data?.id, sourceId: data?.source_id || sourceId };
 }
 
+function responseItems(resp) {
+  return Array.isArray(resp?.payload) ? resp.payload
+    : Array.isArray(resp?.data?.payload) ? resp.data.payload
+    : Array.isArray(resp?.data) ? resp.data
+    : Array.isArray(resp) ? resp
+    : [];
+}
+
 async function ensureContact(msg, inboxId) {
   const existing = await findContactBySourceId(msg.sourceId, msg.phone);
   if (existing?.contactInboxId) {
@@ -965,10 +973,7 @@ async function ensureContact(msg, inboxId) {
 async function getOrCreateConversation(msg, ctx, inboxId) {
   const list = await evoFetch(`/api/v1/contacts/${ctx.contactId}/conversations`)
     .catch(err => { if (err.status === 404) return { payload: [] }; throw err; });
-  const items = Array.isArray(list?.payload) ? list.payload
-    : Array.isArray(list?.data?.payload) ? list.data.payload
-    : Array.isArray(list?.data) ? list.data
-    : [];
+  const items = responseItems(list);
   const existing = items.find(c => c.inbox_id === inboxId && c.status === 'open')
     || items.find(c => c.inbox_id === inboxId);
   if (existing?.id) {
@@ -976,25 +981,55 @@ async function getOrCreateConversation(msg, ctx, inboxId) {
     return existing.id;
   }
 
-  const created = await evoFetch('/api/v1/conversations', {
-    method: 'POST',
-    body: JSON.stringify({
-      source_id: msg.sourceId,
-      inbox_id: inboxId,
-      contact_id: ctx.contactId,
-      status: 'open',
-      custom_attributes: {
-        fzap_channel: msg.channelLabel,
-        fzap_channel_key: msg.channelKey,
-        fzap_phone: msg.phone
-      }
-    })
-  });
+  const existingBySource = await findConversationBySourceId(msg.sourceId, inboxId);
+  if (existingBySource) return existingBySource;
+
+  let created;
+  try {
+    created = await evoFetch('/api/v1/conversations', {
+      method: 'POST',
+      body: JSON.stringify({
+        source_id: msg.sourceId,
+        inbox_id: inboxId,
+        contact_id: ctx.contactId,
+        status: 'open',
+        custom_attributes: {
+          fzap_channel: msg.channelLabel,
+          fzap_channel_key: msg.channelKey,
+          fzap_phone: msg.phone
+        }
+      })
+    });
+  } catch (err) {
+    const recovered = await findConversationBySourceId(msg.sourceId, inboxId);
+    if (recovered) {
+      log('warn', 'conversation create failed but recovered by source_id', {
+        id: recovered,
+        status: err.status,
+        body: err.body
+      });
+      return recovered;
+    }
+    throw err;
+  }
   const data = created?.payload || created?.data || created;
   const convId = data?.id || data?.conversation?.id;
   log('info', 'conversation created', { id: convId, status: created?.__status });
   if (!convId) throw new Error(`conversation create missing id, raw=${summarizePayload(created)}`);
   return convId;
+}
+
+async function findConversationBySourceId(sourceId, inboxId) {
+  if (!sourceId) return '';
+  const q = encodeURIComponent(sourceId);
+  const list = await evoFetch(`/api/v1/conversations?status=all&source_id=${q}&per_page=100`)
+    .catch(err => { if (err.status === 404) return { payload: [] }; throw err; });
+  const items = responseItems(list);
+  const existing = items.find(c => c.inbox_id === inboxId && c.status === 'open')
+    || items.find(c => c.inbox_id === inboxId);
+  if (!existing?.id) return '';
+  log('info', 'conversation found by source_id', { id: existing.id, status: existing.status, sourceId });
+  return existing.id;
 }
 
 async function addIncomingMessage(msg, conversationId) {

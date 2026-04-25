@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-debug-error-detail';
+const VERSION = 'bridge-2026-04-25-ignore-technical-events';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -211,6 +211,19 @@ function incomingMessageObject(payload) {
     'message',
     'automationMessage'
   ]);
+}
+
+function isTechnicalIncomingEvent(eventName) {
+  return [
+    'identitychange',
+    'readreceipt',
+    'statusmessage',
+    'receipt',
+    'presence',
+    'chatpresence',
+    'historysync',
+    'appstate'
+  ].includes(String(eventName || '').toLowerCase());
 }
 
 function cleanupTimedMap(map, ttlMs, now = Date.now()) {
@@ -545,6 +558,10 @@ async function reverseLid(channelKey, lid) {
 
 async function parseIncoming(payload, channelKey) {
   const eventName = incomingEventName(payload);
+  if (isTechnicalIncomingEvent(eventName)) {
+    return { ignore: true, reason: 'technical_event', debug: { eventName } };
+  }
+
   const fromMe = Boolean(firstPath(payload, [
     'event.Info.IsFromMe',
     'event.Info.MessageSource.IsFromMe',

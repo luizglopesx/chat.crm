@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-public-debug-summary';
+const VERSION = 'bridge-2026-04-25-debug-error-detail';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -33,6 +33,7 @@ function maskPhone(value) {
 }
 
 function publicDiagnosticEntry(entry) {
+  const detail = entry.body?.details || entry.body?.error || entry.body?.message || entry.error;
   return compactObject({
     ts: entry.ts,
     level: entry.level,
@@ -43,6 +44,7 @@ function publicDiagnosticEntry(entry) {
     messageType: entry.messageType,
     reason: entry.reason,
     status: entry.status,
+    detail: detail ? String(detail).slice(0, 300) : undefined,
     conversationId: entry.conversationId || entry.id,
     contactId: entry.contactId,
     phone: maskPhone(entry.phone),

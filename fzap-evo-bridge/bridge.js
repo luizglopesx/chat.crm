@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-fix-from-me-phone';
+const VERSION = 'bridge-2026-04-25-debug-message-create';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -1010,22 +1010,32 @@ async function addIncomingMessage(msg, conversationId) {
     }
   }
 
+  const payload = compactObject({
+    content: msg.content,
+    message_type: msg.messageType || 'incoming',
+    private: false,
+    echo_id: msg.echoId,
+    content_attributes: compactObject({
+      fzap_echo_id: msg.echoId,
+      fzap_channel_key: msg.channelKey,
+      fzap_synced_from_me: msg.fromMe || undefined,
+      fzap_bridge_sync_only: msg.fromMe || undefined
+    })
+  });
   const result = await evoFetch(`/api/v1/conversations/${conversationId}/messages`, {
     method: 'POST',
-    body: JSON.stringify(compactObject({
-      content: msg.content,
-      message_type: msg.messageType || 'incoming',
-      private: false,
-      echo_id: msg.echoId,
-      content_attributes: compactObject({
-        fzap_echo_id: msg.echoId,
-        fzap_channel_key: msg.channelKey,
-        fzap_synced_from_me: msg.fromMe || undefined,
-        fzap_bridge_sync_only: msg.fromMe || undefined
-      })
-    }))
+    body: JSON.stringify(payload)
   });
-  log('info', 'message created', { conversationId, messageId: result?.id });
+  const messageId = result?.id || result?.payload?.id || result?.data?.id;
+  log('info', 'message created', {
+    conversationId,
+    messageId,
+    messageType: payload.message_type,
+    fromMe: Boolean(msg.fromMe),
+    status: result?.__status,
+    responseKeys: result ? Object.keys(result).slice(0, 20).join(',') : 'null',
+    responseSnippet: summarizePayload(result)
+  });
   return result;
 }
 

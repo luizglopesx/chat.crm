@@ -129,7 +129,7 @@ Nas criações de mensagem no EvoCRM, o log `message created` agora traz `messag
 - ✅ Mensagens saindo do CRM para o WhatsApp (regressão dos headers Wuzapi corrigida em `bridge-2026-04-25-fix-wuzapi-headers`)
 - ✅ Automações externas chegando no EvoCRM como mensagens outgoing (`bridge-2026-04-25-fix-from-me-phone` consertou a extração de telefone que pegava o número do canal; `bridge-2026-04-25-strip-internal-attrs` removeu flags em `content_attributes` que o EvoCRM usava para esconder a mensagem da UI, movendo o dedup para memória)
 - ⏳ Validar sticker, vCard e localização com payload real
-- ✅ 500 esporádico em `POST /api/v1/conversations` mitigado: quando `/contacts/{id}/conversations` não retorna uma conversa existente, a bridge procura também por `/conversations?status=all&source_id=...`; se a criação falhar mas a conversa existir, recupera por `source_id`, tenta reabrir se não estiver `open` e continua postando a mensagem.
+- ✅ 500 esporádico em `POST /api/v1/conversations` mitigado: quando `/contacts/{id}/conversations` não retorna uma conversa existente, a bridge procura também por `/conversations?status=all&source_id=...`; se a criação falhar, relê por `source_id` e por contato, tenta reabrir se não estiver `open` e continua postando a mensagem quando consegue recuperar.
 - ⏳ Conversas antigas vazias no CRM: não preenchem retroativamente; limpar manualmente
 
 ### Regressões resolvidas em 2026-04-25

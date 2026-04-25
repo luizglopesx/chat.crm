@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-ignore-technical-events';
+const VERSION = 'bridge-2026-04-25-conversation-error-recovery';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -33,7 +33,8 @@ function maskPhone(value) {
 }
 
 function publicDiagnosticEntry(entry) {
-  const detail = entry.body?.details || entry.body?.error || entry.body?.message || entry.error;
+  const rawDetail = entry.body?.details || entry.body?.error || entry.body?.message || entry.error;
+  const detail = typeof rawDetail === 'object' ? summarizePayload(rawDetail) : rawDetail;
   return compactObject({
     ts: entry.ts,
     level: entry.level,
@@ -1025,16 +1026,8 @@ async function ensureContact(msg, inboxId) {
 }
 
 async function getOrCreateConversation(msg, ctx, inboxId) {
-  const list = await evoFetch(`/api/v1/contacts/${ctx.contactId}/conversations`)
-    .catch(err => { if (err.status === 404) return { payload: [] }; throw err; });
-  const items = responseItems(list);
-  const existing = items.find(c => c.inbox_id === inboxId && c.status === 'open')
-    || items.find(c => c.inbox_id === inboxId);
-  if (existing?.id) {
-    log('info', 'conversation found', { id: existing.id, status: existing.status });
-    await ensureConversationOpen(existing.id, existing.status);
-    return existing.id;
-  }
+  const existingForContact = await findConversationForContact(ctx.contactId, inboxId);
+  if (existingForContact) return existingForContact;
 
   const existingBySource = await findConversationBySourceId(msg.sourceId, inboxId);
   if (existingBySource) return existingBySource;
@@ -1056,7 +1049,8 @@ async function getOrCreateConversation(msg, ctx, inboxId) {
       })
     });
   } catch (err) {
-    const recovered = await findConversationBySourceId(msg.sourceId, inboxId);
+    const recovered = await findConversationBySourceId(msg.sourceId, inboxId)
+      || await findConversationForContact(ctx.contactId, inboxId);
     if (recovered) {
       log('warn', 'conversation create failed but recovered by source_id', {
         id: recovered,
@@ -1072,6 +1066,19 @@ async function getOrCreateConversation(msg, ctx, inboxId) {
   log('info', 'conversation created', { id: convId, status: created?.__status });
   if (!convId) throw new Error(`conversation create missing id, raw=${summarizePayload(created)}`);
   return convId;
+}
+
+async function findConversationForContact(contactId, inboxId) {
+  if (!contactId) return '';
+  const list = await evoFetch(`/api/v1/contacts/${contactId}/conversations`)
+    .catch(err => { if (err.status === 404) return { payload: [] }; throw err; });
+  const items = responseItems(list);
+  const existing = items.find(c => c.inbox_id === inboxId && c.status === 'open')
+    || items.find(c => c.inbox_id === inboxId);
+  if (!existing?.id) return '';
+  log('info', 'conversation found', { id: existing.id, status: existing.status });
+  await ensureConversationOpen(existing.id, existing.status);
+  return existing.id;
 }
 
 async function findConversationBySourceId(sourceId, inboxId) {

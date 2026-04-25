@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-debug-message-create';
+const VERSION = 'bridge-2026-04-25-strip-internal-attrs';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -16,6 +16,7 @@ const INCOMING_DEDUPE_TTL_MS = 10 * 60 * 1000;
 const WUZAPI_WEBHOOK_SYNC_INTERVAL_MS = Number(process.env.WUZAPI_WEBHOOK_SYNC_INTERVAL_MS || 5 * 60 * 1000);
 const recentIncomingMessages = new Map();
 const recentBridgeOutboundIds = new Map();
+const recentExternalFromMeIds = new Map();
 const recentDiagnostics = [];
 
 function log(level, message, data = {}) {
@@ -175,11 +176,6 @@ function incomingMessageObject(payload) {
   ]);
 }
 
-function isBridgeSyncedOutgoing(payload) {
-  const attrs = payload.content_attributes || payload.additional_attributes || {};
-  return Boolean(attrs.fzap_synced_from_me || attrs.fzap_bridge_sync_only);
-}
-
 function cleanupTimedMap(map, ttlMs, now = Date.now()) {
   for (const [key, ts] of map.entries()) {
     if (now - ts > ttlMs) map.delete(key);
@@ -197,6 +193,28 @@ function isBridgeOutboundId(id) {
   cleanupTimedMap(recentBridgeOutboundIds, INCOMING_DEDUPE_TTL_MS);
   const text = String(id);
   return recentBridgeOutboundIds.has(text) || text.startsWith('EVOCRM');
+}
+
+function markExternalFromMeId(id) {
+  if (!id) return;
+  cleanupTimedMap(recentExternalFromMeIds, INCOMING_DEDUPE_TTL_MS);
+  recentExternalFromMeIds.set(String(id), Date.now());
+}
+
+function isExternalFromMeEcho(payload) {
+  cleanupTimedMap(recentExternalFromMeIds, INCOMING_DEDUPE_TTL_MS);
+  const candidates = [
+    payload?.source_id,
+    payload?.echo_id,
+    payload?.id,
+    payload?.message?.source_id,
+    payload?.message?.echo_id
+  ].filter(Boolean).map(String);
+  return candidates.some(id => recentExternalFromMeIds.has(id));
+}
+
+function isBridgeSyncedOutgoing(payload) {
+  return isExternalFromMeEcho(payload);
 }
 
 function outgoingWuzapiId(payload, suffix = '') {
@@ -1010,17 +1028,12 @@ async function addIncomingMessage(msg, conversationId) {
     }
   }
 
+  if (msg.fromMe && msg.echoId) markExternalFromMeId(msg.echoId);
   const payload = compactObject({
     content: msg.content,
     message_type: msg.messageType || 'incoming',
     private: false,
-    echo_id: msg.echoId,
-    content_attributes: compactObject({
-      fzap_echo_id: msg.echoId,
-      fzap_channel_key: msg.channelKey,
-      fzap_synced_from_me: msg.fromMe || undefined,
-      fzap_bridge_sync_only: msg.fromMe || undefined
-    })
+    echo_id: msg.echoId
   });
   const result = await evoFetch(`/api/v1/conversations/${conversationId}/messages`, {
     method: 'POST',
@@ -1112,18 +1125,13 @@ async function buildLocationMapSvg(location) {
 }
 
 async function addIncomingLocationMessage(msg, conversationId) {
+  if (msg.fromMe && msg.echoId) markExternalFromMeId(msg.echoId);
   const svg = await buildLocationMapSvg(msg.location);
   const form = new FormData();
   form.append('content', msg.content);
   form.append('message_type', msg.messageType || 'incoming');
   form.append('private', 'false');
   form.append('echo_id', msg.echoId);
-  form.append('content_attributes', JSON.stringify(compactObject({
-    fzap_echo_id: msg.echoId,
-    fzap_channel_key: msg.channelKey,
-    fzap_synced_from_me: msg.fromMe || undefined,
-    fzap_bridge_sync_only: msg.fromMe || undefined
-  })));
   form.append('attachments[]', new Blob([svg], { type: 'image/svg+xml' }), `localizacao-${msg.echoId || Date.now()}.svg`);
 
   const result = await evoFetchForm(`/api/v1/conversations/${conversationId}/messages`, form);
@@ -1162,18 +1170,13 @@ async function downloadIncomingMedia(msg) {
 }
 
 async function addIncomingMediaMessage(msg, conversationId) {
+  if (msg.fromMe && msg.echoId) markExternalFromMeId(msg.echoId);
   const media = await downloadIncomingMedia(msg);
   const form = new FormData();
   form.append('content', msg.content);
   form.append('message_type', msg.messageType || 'incoming');
   form.append('private', 'false');
   form.append('echo_id', msg.echoId);
-  form.append('content_attributes', JSON.stringify(compactObject({
-    fzap_echo_id: msg.echoId,
-    fzap_channel_key: msg.channelKey,
-    fzap_synced_from_me: msg.fromMe || undefined,
-    fzap_bridge_sync_only: msg.fromMe || undefined
-  })));
   form.append('attachments[]', media.blob, media.fileName);
 
   const result = await evoFetchForm(`/api/v1/conversations/${conversationId}/messages`, form);

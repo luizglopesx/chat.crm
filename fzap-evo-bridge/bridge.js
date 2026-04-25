@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-conversation-error-recovery';
+const VERSION = 'bridge-2026-04-25-public-conversation-fallback';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -1052,12 +1052,26 @@ async function getOrCreateConversation(msg, ctx, inboxId) {
     const recovered = await findConversationBySourceId(msg.sourceId, inboxId)
       || await findConversationForContact(ctx.contactId, inboxId);
     if (recovered) {
-      log('warn', 'conversation create failed but recovered by source_id', {
+      log('warn', 'conversation create failed but recovered', {
         id: recovered,
         status: err.status,
         body: err.body
       });
       return recovered;
+    }
+
+    const publicCreated = await createConversationViaPublicApi(msg, err);
+    if (publicCreated) {
+      const recoveredAfterPublicCreate = await findConversationBySourceId(msg.sourceId, inboxId)
+        || await findConversationForContact(ctx.contactId, inboxId);
+      if (recoveredAfterPublicCreate) {
+        log('warn', 'conversation recovered after public create fallback', {
+          id: recoveredAfterPublicCreate,
+          status: err.status,
+          body: err.body
+        });
+        return recoveredAfterPublicCreate;
+      }
     }
     throw err;
   }
@@ -1079,6 +1093,34 @@ async function findConversationForContact(contactId, inboxId) {
   log('info', 'conversation found', { id: existing.id, status: existing.status });
   await ensureConversationOpen(existing.id, existing.status);
   return existing.id;
+}
+
+async function createConversationViaPublicApi(msg, originalErr) {
+  try {
+    const path = `/public/api/v1/inboxes/${encodeURIComponent(EVO_INBOX_IDENTIFIER)}/contacts/${encodeURIComponent(msg.sourceId)}/conversations`;
+    await evoFetch(path, {
+      method: 'POST',
+      body: JSON.stringify({
+        custom_attributes: {
+          fzap_channel: msg.channelLabel,
+          fzap_channel_key: msg.channelKey,
+          fzap_phone: msg.phone
+        }
+      })
+    });
+    log('info', 'public conversation create fallback attempted', { sourceId: msg.sourceId });
+    return true;
+  } catch (err) {
+    log('warn', 'public conversation create fallback failed', {
+      sourceId: msg.sourceId,
+      originalStatus: originalErr?.status,
+      originalBody: originalErr?.body,
+      status: err.status,
+      body: err.body,
+      error: err.message
+    });
+    return false;
+  }
 }
 
 async function findConversationBySourceId(sourceId, inboxId) {

@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-24-automation-diagnostics';
+const VERSION = 'bridge-2026-04-25-fix-wuzapi-headers';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -1198,8 +1198,7 @@ function wuzapiHeaders(channel, hasBody = false) {
   return compactObject({
     ...(hasBody ? { 'content-type': 'application/json' } : {}),
     token: channel.token,
-    Token: channel.token,
-    ...(instance ? { instance, Instance: instance } : {})
+    ...(instance ? { instance } : {})
   });
 }
 

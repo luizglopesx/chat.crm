@@ -30,6 +30,7 @@ Ambos caem no mesmo inbox `FZAP WhatsApp`; o canal vira `custom_attributes` no c
 - `POST /fzap/webhook/canal2?secret=...` — webhook da Wuzapi do canal2
 - `POST /fzap/outgoing?secret=...`        — webhook do EvoCRM (mensagens saindo pro WhatsApp)
 - `GET  /fzap/debug?secret=...`           — diagnóstico recente da bridge, protegido pelo mesmo secret
+- `GET  /fzap/debug-summary`              — resumo público sanitizado dos últimos eventos, sem conteúdo de mensagem/token e com telefone mascarado
 
 ## Variáveis de ambiente (stack `fzap_evo_bridge`)
 
@@ -98,6 +99,8 @@ Feita uma vez, nunca mais precisa:
 Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-25-strip-internal-attrs`). Em caso de erro, o log traz a URL e método que falharam (`EvoCRM 404 GET /api/v1/...`), além de snippets do payload FZAP quando a extração de telefone falha.
 
 O endpoint `GET /fzap/debug?secret=...` devolve os últimos ~80 eventos da bridge em memória (entradas, saídas, ignorados, erros) — útil pra diagnosticar sem precisar abrir o container no Portainer.
+
+O endpoint `GET /fzap/debug-summary` devolve só um resumo sanitizado dos últimos eventos, útil para confirmar rapidamente se webhooks recentes chegaram na bridge sem expor conteúdo ou segredos.
 
 Nas criações de mensagem no EvoCRM, o log `message created` agora traz `messageId`, `messageType`, `fromMe`, `status`, `responseKeys` e `responseSnippet`, então dá pra ver exatamente o que o EvoCRM devolveu se a mensagem não aparecer na UI.
 

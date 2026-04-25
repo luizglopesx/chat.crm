@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-reopen-source-conversation';
+const VERSION = 'bridge-2026-04-25-public-debug-summary';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -24,6 +24,41 @@ function log(level, message, data = {}) {
   recentDiagnostics.push(entry);
   while (recentDiagnostics.length > 200) recentDiagnostics.shift();
   console.log(JSON.stringify(entry));
+}
+
+function maskPhone(value) {
+  const digits = digitsOnly(value);
+  if (!digits) return undefined;
+  return `${digits.slice(0, 4)}***${digits.slice(-4)}`;
+}
+
+function publicDiagnosticEntry(entry) {
+  return compactObject({
+    ts: entry.ts,
+    level: entry.level,
+    message: entry.message,
+    channelKey: entry.channelKey,
+    eventName: entry.eventName,
+    fromMe: entry.fromMe,
+    messageType: entry.messageType,
+    reason: entry.reason,
+    status: entry.status,
+    conversationId: entry.conversationId || entry.id,
+    contactId: entry.contactId,
+    phone: maskPhone(entry.phone),
+    sourceId: entry.sourceId ? String(entry.sourceId).replace(/^\d+/, match => maskPhone(match) || match) : undefined,
+    media: entry.media
+  });
+}
+
+function publicDiagnosticsSummary() {
+  const recent = recentDiagnostics.slice(-80).map(publicDiagnosticEntry);
+  const counts = recent.reduce((acc, entry) => {
+    const key = entry.message || 'unknown';
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  return { counts, recent: recent.slice(-30) };
 }
 
 function sendJson(res, status, body) {
@@ -1520,6 +1555,20 @@ async function sendToWuzapi(payload) {
 
 async function handleIncoming(req, res, channelKey) {
   const payload = await readBody(req);
+  log('info', 'webhook received', {
+    channelKey,
+    eventName: incomingEventName(payload),
+    fromMe: Boolean(firstPath(payload, [
+      'event.Info.IsFromMe',
+      'data.Info.IsFromMe',
+      'Data.Info.IsFromMe',
+      'Info.IsFromMe',
+      'event.key.fromMe',
+      'data.key.fromMe',
+      'key.fromMe',
+      'fromMe'
+    ]))
+  });
   const msg = await parseIncoming(payload, channelKey);
   if (msg.ignore) {
     log('info', 'incoming ignored', { channelKey, reason: msg.reason, ...(msg.debug || {}) });
@@ -1569,6 +1618,14 @@ const server = http.createServer(async (req, res) => {
         version: VERSION,
         channels: Object.keys(CHANNELS),
         webhookSyncIntervalMs: WUZAPI_WEBHOOK_SYNC_INTERVAL_MS
+      });
+    }
+    if (req.method === 'GET' && url.pathname === '/fzap/debug-summary') {
+      return sendJson(res, 200, {
+        ok: true,
+        version: VERSION,
+        channels: Object.keys(CHANNELS),
+        ...publicDiagnosticsSummary()
       });
     }
     if (SECRET && url.searchParams.get('secret') !== SECRET) return sendJson(res, 401, { ok: false, error: 'unauthorized' });

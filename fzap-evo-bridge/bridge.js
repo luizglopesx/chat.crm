@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-27-media-diagnostics';
+const VERSION = 'bridge-2026-04-27-wuzapi-session-reconnect';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -23,7 +23,7 @@ const labelCache = new Map();
 function log(level, message, data = {}) {
   const entry = { ts: new Date().toISOString(), level, message, ...data };
   recentDiagnostics.push(entry);
-  while (recentDiagnostics.length > 500) recentDiagnostics.shift();
+  while (recentDiagnostics.length > 200) recentDiagnostics.shift();
   console.log(JSON.stringify(entry));
 }
 
@@ -51,22 +51,18 @@ function publicDiagnosticEntry(entry) {
     contactId: entry.contactId,
     phone: maskPhone(entry.phone),
     sourceId: entry.sourceId ? String(entry.sourceId).replace(/^\d+/, match => maskPhone(match) || match) : undefined,
-    media: entry.media,
-    hasMediaMessage: entry.hasMediaMessage,
-    mediaKind: entry.mediaKind,
-    missingMediaFields: entry.missingMediaFields,
-    mediaKeys: entry.mediaKeys
+    media: entry.media
   });
 }
 
 function publicDiagnosticsSummary() {
-  const recent = recentDiagnostics.slice(-200).map(publicDiagnosticEntry);
+  const recent = recentDiagnostics.slice(-80).map(publicDiagnosticEntry);
   const counts = recent.reduce((acc, entry) => {
     const key = entry.message || 'unknown';
     acc[key] = (acc[key] || 0) + 1;
     return acc;
   }, {});
-  return { counts, recent: recent.slice(-50) };
+  return { counts, recent: recent.slice(-30) };
 }
 
 function sendJson(res, status, body) {
@@ -114,17 +110,6 @@ function firstPath(obj, paths) {
     if (value !== undefined && value !== null && String(value) !== '') return value;
   }
   return undefined;
-}
-
-function truthyFlag(value) {
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'number') return value !== 0;
-  if (typeof value === 'string') {
-    const text = value.trim().toLowerCase();
-    if (['true', '1', 'yes', 'sim'].includes(text)) return true;
-    if (['false', '0', 'no', 'nao'].includes(text)) return false;
-  }
-  return Boolean(value);
 }
 
 function walkFind(obj, names) {
@@ -217,28 +202,20 @@ function incomingMessageObject(payload) {
   return firstPath(payload, [
     'event.Message',
     'event.AutomationMessage',
-    'event.StatusMessage',
     'event.message',
     'event.automationMessage',
-    'event.statusMessage',
     'data.Message',
     'data.AutomationMessage',
-    'data.StatusMessage',
     'data.message',
     'data.automationMessage',
-    'data.statusMessage',
     'Data.Message',
     'Data.AutomationMessage',
-    'Data.StatusMessage',
     'Data.message',
     'Data.automationMessage',
-    'Data.statusMessage',
     'Message',
     'AutomationMessage',
-    'StatusMessage',
     'message',
-    'automationMessage',
-    'statusMessage'
+    'automationMessage'
   ]);
 }
 
@@ -252,16 +229,6 @@ function isTechnicalIncomingEvent(eventName) {
     'chatpresence',
     'historysync',
     'appstate'
-  ].includes(String(eventName || '').toLowerCase());
-}
-
-function isSyncDiagnosticEvent(eventName) {
-  return [
-    'appstate',
-    'appstatesynccomplete',
-    'historysync',
-    'offlinesynccompleted',
-    'offlinesyncpreview'
   ].includes(String(eventName || '').toLowerCase());
 }
 
@@ -483,21 +450,6 @@ function extractMessageText(message) {
     'imageMessage.caption',
     'videoMessage.caption',
     'documentMessage.caption',
-    'message.conversation',
-    'message.extendedTextMessage.text',
-    'message.imageMessage.caption',
-    'message.videoMessage.caption',
-    'message.documentMessage.caption',
-    'ephemeralMessage.message.conversation',
-    'ephemeralMessage.message.extendedTextMessage.text',
-    'ephemeralMessage.message.imageMessage.caption',
-    'ephemeralMessage.message.videoMessage.caption',
-    'ephemeralMessage.message.documentMessage.caption',
-    'viewOnceMessage.message.imageMessage.caption',
-    'viewOnceMessage.message.videoMessage.caption',
-    'viewOnceMessageV2.message.imageMessage.caption',
-    'viewOnceMessageV2.message.videoMessage.caption',
-    'documentWithCaptionMessage.message.documentMessage.caption',
     'buttonsResponseMessage.selectedDisplayText',
     'buttonsResponseMessage.selectedButtonId',
     'listResponseMessage.title',
@@ -517,99 +469,10 @@ function extractMediaUrl(payload) {
     'Data.mediaUrl',
     'event.mediaUrl',
     'mediaUrl',
+    'url',
     'downloadUrl',
     'fileUrl'
-  ]) || walkFind(payload, ['mediaUrl', 'downloadUrl', 'fileUrl']);
-}
-
-function nestedMediaMessage(message) {
-  if (!message || typeof message !== 'object') return null;
-  return firstPath(message, [
-    'imageMessage',
-    'videoMessage',
-    'documentMessage',
-    'audioMessage',
-    'stickerMessage',
-    'message.imageMessage',
-    'message.videoMessage',
-    'message.documentMessage',
-    'message.audioMessage',
-    'message.stickerMessage',
-    'ephemeralMessage.message.imageMessage',
-    'ephemeralMessage.message.videoMessage',
-    'ephemeralMessage.message.documentMessage',
-    'ephemeralMessage.message.audioMessage',
-    'ephemeralMessage.message.stickerMessage',
-    'viewOnceMessage.message.imageMessage',
-    'viewOnceMessage.message.videoMessage',
-    'viewOnceMessageV2.message.imageMessage',
-    'viewOnceMessageV2.message.videoMessage',
-    'documentWithCaptionMessage.message.documentMessage'
-  ]);
-}
-
-function mediaMessageKind(message) {
-  if (!message || typeof message !== 'object') return '';
-  if (firstPath(message, ['imageMessage', 'message.imageMessage', 'ephemeralMessage.message.imageMessage', 'viewOnceMessage.message.imageMessage', 'viewOnceMessageV2.message.imageMessage'])) return 'imagem';
-  if (firstPath(message, ['videoMessage', 'message.videoMessage', 'ephemeralMessage.message.videoMessage', 'viewOnceMessage.message.videoMessage', 'viewOnceMessageV2.message.videoMessage'])) return 'video';
-  if (firstPath(message, ['documentMessage', 'message.documentMessage', 'ephemeralMessage.message.documentMessage', 'documentWithCaptionMessage.message.documentMessage'])) return 'documento';
-  if (firstPath(message, ['audioMessage', 'message.audioMessage', 'ephemeralMessage.message.audioMessage'])) return 'audio';
-  if (firstPath(message, ['stickerMessage', 'message.stickerMessage', 'ephemeralMessage.message.stickerMessage'])) return 'sticker';
-  return '';
-}
-
-function mediaDownloadEndpoint(mediaKind) {
-  if (mediaKind === 'imagem') return '/chat/downloadimage';
-  if (mediaKind === 'video') return '/chat/downloadvideo';
-  if (mediaKind === 'documento') return '/chat/downloaddocument';
-  if (mediaKind === 'audio') return '/chat/downloadaudio';
-  return '';
-}
-
-function extractMediaDownload(message, payload) {
-  const media = nestedMediaMessage(message);
-  if (!media || typeof media !== 'object') return null;
-
-  const mediaKind = mediaMessageKind(message) || incomingMediaKind(message, payload);
-  const endpoint = mediaDownloadEndpoint(mediaKind);
-  if (!endpoint) return null;
-
-  const request = compactObject({
-    url: firstPath(media, ['url', 'URL']),
-    directPath: firstPath(media, ['directPath', 'DirectPath']),
-    mediaKey: firstPath(media, ['mediaKey', 'MediaKey']),
-    mimeType: firstPath(media, ['mimetype', 'mimeType', 'MimeType']),
-    fileEncSha256: firstPath(media, ['fileEncSha256', 'fileEncSHA256', 'FileEncSHA256']),
-    fileSha256: firstPath(media, ['fileSha256', 'fileSHA256', 'FileSHA256']),
-    fileLength: firstPath(media, ['fileLength', 'FileLength']),
-    generateLink: false
-  });
-  if (!request.url || !request.mediaKey || !request.mimeType || !request.fileSha256 || !request.fileLength) return null;
-
-  return {
-    endpoint,
-    request,
-    mediaKind,
-    mimeType: request.mimeType,
-    fileName: incomingMediaFileName(payload, '', mediaKind, request.mimeType)
-  };
-}
-
-function missingMediaDownloadFields(media) {
-  if (!media || typeof media !== 'object') return [];
-  const checks = {
-    url: firstPath(media, ['url', 'URL']),
-    mediaKey: firstPath(media, ['mediaKey', 'MediaKey']),
-    mimeType: firstPath(media, ['mimetype', 'mimeType', 'MimeType']),
-    fileSha256: firstPath(media, ['fileSha256', 'fileSHA256', 'FileSHA256']),
-    fileLength: firstPath(media, ['fileLength', 'FileLength'])
-  };
-  return Object.entries(checks).filter(([, value]) => !value).map(([key]) => key);
-}
-
-function publicMediaKeys(media) {
-  if (!media || typeof media !== 'object') return [];
-  return Object.keys(media).filter(key => !/thumbnail|jpeg|mediaKey|sha256|url|directPath/i.test(key)).slice(0, 20);
+  ]) || walkFind(payload, ['mediaUrl', 'downloadUrl', 'fileUrl', 'url']);
 }
 
 function incomingMediaKind(message, payload) {
@@ -677,25 +540,6 @@ function incomingContactText(message) {
   return [`[contato recebido] ${displayName || ''}`.trim(), vcard].filter(Boolean).join('\n');
 }
 
-function hasIncomingMessagePayload(payload, messageObject) {
-  if (messageObject && typeof messageObject === 'object') {
-    const text = extractMessageText(messageObject);
-    if (text) return true;
-    if (incomingLocationDetails(messageObject)) return true;
-    if (incomingContactText(messageObject)) return true;
-  }
-  if (extractMediaUrl(payload)) return true;
-  return Boolean(firstPath(payload, [
-    'event.body',
-    'data.body',
-    'Data.body',
-    'body',
-    'text',
-    'content',
-    'caption'
-  ]) || walkFind(payload, ['conversation', 'text', 'body', 'caption']));
-}
-
 async function reverseLid(channelKey, lid) {
   const channel = CHANNELS[channelKey] || {};
   if (!channel.token || !lid) return '';
@@ -720,19 +564,11 @@ async function reverseLid(channelKey, lid) {
 
 async function parseIncoming(payload, channelKey) {
   const eventName = incomingEventName(payload);
-  const messageObject = incomingMessageObject(payload);
-  if (isTechnicalIncomingEvent(eventName) && !hasIncomingMessagePayload(payload, messageObject)) {
-    return {
-      ignore: true,
-      reason: 'technical_event',
-      debug: {
-        eventName,
-        ...(isSyncDiagnosticEvent(eventName) ? { payloadSnippet: summarizePayload(payload) } : {})
-      }
-    };
+  if (isTechnicalIncomingEvent(eventName)) {
+    return { ignore: true, reason: 'technical_event', debug: { eventName } };
   }
 
-  const fromMe = truthyFlag(firstPath(payload, [
+  const fromMe = Boolean(firstPath(payload, [
     'event.Info.IsFromMe',
     'event.Info.MessageSource.IsFromMe',
     'event.Info.messageSource.isFromMe',
@@ -790,7 +626,6 @@ async function parseIncoming(payload, channelKey) {
     'phone'
   ]);
   const chatJidText = normalizeJidValue(rawChatJid);
-  if (chatJidText === 'status@broadcast') return { ignore: true, reason: 'status_broadcast', debug: { eventName } };
   if (chatJidText.includes('@g.us')) return { ignore: true, reason: 'group' };
 
   const senderAltJid = firstPath(payload, [
@@ -832,72 +667,28 @@ async function parseIncoming(payload, channelKey) {
 
   const recipientAltJid = firstPath(payload, [
     'event.Info.RecipientAlt',
-    'event.Info.RecipientPN',
-    'event.Info.RecipientPn',
-    'event.Info.Recipient',
-    'event.Info.To',
     'event.Info.ChatAlt',
     'event.Info.MessageSource.RecipientAlt',
-    'event.Info.MessageSource.Recipient',
-    'event.Info.MessageSource.RecipientPN',
-    'event.Info.MessageSource.RecipientPn',
-    'event.Info.MessageSource.To',
     'event.Info.MessageSource.ChatAlt',
     'event.Info.messageSource.recipientAlt',
-    'event.Info.messageSource.recipient',
-    'event.Info.messageSource.recipientPn',
-    'event.Info.messageSource.to',
     'event.Info.messageSource.chatAlt',
     'data.Info.RecipientAlt',
-    'data.Info.RecipientPN',
-    'data.Info.RecipientPn',
-    'data.Info.Recipient',
-    'data.Info.To',
     'data.Info.ChatAlt',
     'data.Info.MessageSource.RecipientAlt',
-    'data.Info.MessageSource.Recipient',
-    'data.Info.MessageSource.RecipientPN',
-    'data.Info.MessageSource.RecipientPn',
-    'data.Info.MessageSource.To',
     'data.Info.MessageSource.ChatAlt',
     'data.Info.messageSource.recipientAlt',
-    'data.Info.messageSource.recipient',
-    'data.Info.messageSource.recipientPn',
-    'data.Info.messageSource.to',
     'data.Info.messageSource.chatAlt',
     'Data.Info.RecipientAlt',
-    'Data.Info.RecipientPN',
-    'Data.Info.RecipientPn',
-    'Data.Info.Recipient',
-    'Data.Info.To',
     'Data.Info.ChatAlt',
     'Data.Info.MessageSource.RecipientAlt',
-    'Data.Info.MessageSource.Recipient',
-    'Data.Info.MessageSource.RecipientPN',
-    'Data.Info.MessageSource.RecipientPn',
-    'Data.Info.MessageSource.To',
     'Data.Info.MessageSource.ChatAlt',
     'Data.Info.messageSource.recipientAlt',
-    'Data.Info.messageSource.recipient',
-    'Data.Info.messageSource.recipientPn',
-    'Data.Info.messageSource.to',
     'Data.Info.messageSource.chatAlt',
     'Info.RecipientAlt',
-    'Info.RecipientPN',
-    'Info.RecipientPn',
-    'Info.Recipient',
-    'Info.To',
     'Info.ChatAlt',
     'Info.MessageSource.RecipientAlt',
-    'Info.MessageSource.Recipient',
-    'Info.MessageSource.RecipientPN',
-    'Info.MessageSource.RecipientPn',
-    'Info.MessageSource.To',
     'Info.MessageSource.ChatAlt',
     'Info.messageSource.recipientAlt',
-    'Info.messageSource.recipient',
-    'Info.messageSource.recipientPn',
-    'Info.messageSource.to',
     'Info.messageSource.chatAlt'
   ]);
 
@@ -968,6 +759,7 @@ async function parseIncoming(payload, channelKey) {
     return { ignore: true, reason: 'no_phone' };
   }
 
+  const messageObject = incomingMessageObject(payload);
   const rawText = extractMessageText(messageObject) || firstPath(payload, [
     'event.Message.conversation',
     'event.AutomationMessage.conversation',
@@ -995,21 +787,7 @@ async function parseIncoming(payload, channelKey) {
   const text = rawText && typeof rawText === 'object' ? extractMessageText(rawText) : rawText;
 
   const mediaUrl = extractMediaUrl(payload);
-  const mediaDownload = mediaUrl ? null : extractMediaDownload(messageObject, payload);
-  const mediaKind = mediaUrl ? incomingMediaKind(messageObject, payload) : (mediaDownload?.mediaKind || '');
-  const mediaCandidate = nestedMediaMessage(messageObject);
-  if (mediaCandidate && !mediaUrl && !mediaDownload) {
-    log('warn', 'media metadata incomplete', {
-      channelKey,
-      eventName,
-      fromMe,
-      mediaKind: mediaMessageKind(messageObject) || incomingMediaKind(messageObject, payload),
-      mediaKeys: publicMediaKeys(mediaCandidate),
-      missingMediaFields: missingMediaDownloadFields(mediaCandidate),
-      echoCandidate: firstPath(payload, ['event.Info.ID', 'data.Info.ID', 'Data.Info.ID', 'Info.ID', 'id']),
-      payloadSnippet: summarizePayload(payload)
-    });
-  }
+  const mediaKind = mediaUrl ? incomingMediaKind(messageObject, payload) : '';
   const location = incomingLocationDetails(messageObject);
   const locationText = incomingLocationText(messageObject);
   const contactText = incomingContactText(messageObject);
@@ -1017,7 +795,7 @@ async function parseIncoming(payload, channelKey) {
   let content = String(text || '').trim();
   if (!content && locationText) content = locationText;
   if (!content && contactText) content = contactText;
-  if (!content && (mediaUrl || mediaDownload)) content = `[${mediaKind || 'midia'} recebida]`;
+  if (!content && mediaUrl) content = `[${mediaKind} recebida]`;
   if (!content) {
     return {
       ignore: true,
@@ -1067,9 +845,8 @@ async function parseIncoming(payload, channelKey) {
     eventName,
     messageType: fromMe ? 'outgoing' : 'incoming',
     mediaUrl,
-    mediaDownload,
     mediaKind,
-    mediaFileName: mediaUrl ? incomingMediaFileName(payload, mediaUrl, mediaKind) : (mediaDownload?.fileName || ''),
+    mediaFileName: mediaUrl ? incomingMediaFileName(payload, mediaUrl, mediaKind) : '',
     location,
     echoId,
     channelKey,
@@ -1508,7 +1285,7 @@ async function addIncomingMessage(msg, conversationId) {
     }
   }
 
-  if (msg.mediaUrl || msg.mediaDownload) {
+  if (msg.mediaUrl) {
     try {
       return await addIncomingMediaMessage(msg, conversationId);
     } catch (err) {
@@ -1516,12 +1293,11 @@ async function addIncomingMessage(msg, conversationId) {
         conversationId,
         echoId: msg.echoId,
         mediaUrl: msg.mediaUrl,
-        mediaDownloadEndpoint: msg.mediaDownload?.endpoint,
         status: err.status,
         body: err.body,
         error: err.message
       });
-      msg.content = `${msg.content}\n${msg.mediaUrl || ''}`.trim();
+      msg.content = `${msg.content}\n${msg.mediaUrl}`.trim();
     }
   }
 
@@ -1650,60 +1426,6 @@ async function addIncomingLocationMessage(msg, conversationId) {
 }
 
 async function downloadIncomingMedia(msg) {
-  if (msg.mediaDownload) {
-    const channel = CHANNELS[msg.channelKey] || {};
-    const body = await wuzapiRequest(msg.mediaDownload.endpoint, channel, {
-      method: 'POST',
-      body: msg.mediaDownload.request
-    });
-    const dataUrl = firstPath(body, [
-      'data.data',
-      'data.base64',
-      'data.media',
-      'data.url',
-      'data.downloadUrl',
-      'data.fileUrl',
-      'downloadUrl',
-      'fileUrl',
-      'url'
-    ]);
-    const mimeType = firstPath(body, ['data.mimeType', 'mimeType']) || msg.mediaDownload.mimeType || 'application/octet-stream';
-    if (!dataUrl) {
-      const err = new Error('media download response missing data');
-      err.body = body;
-      throw err;
-    }
-    if (/^https?:\/\//i.test(String(dataUrl))) {
-      const response = await fetch(dataUrl);
-      if (!response.ok) {
-        const err = new Error(`media download link ${response.status}`);
-        err.status = response.status;
-        err.body = { url: dataUrl };
-        throw err;
-      }
-      const responseMimeType = response.headers.get('content-type') || mimeType;
-      const bytes = await response.arrayBuffer();
-      return {
-        blob: new Blob([bytes], { type: responseMimeType }),
-        fileName: msg.mediaFileName || incomingMediaFileName({}, dataUrl, msg.mediaKind, responseMimeType),
-        mimeType: responseMimeType,
-        size: bytes.byteLength
-      };
-    }
-
-    const dataUrlText = String(dataUrl);
-    const match = dataUrlText.match(/^data:([^;,]+)?;base64,(.+)$/);
-    const base64 = match ? match[2] : dataUrlText;
-    const detectedMimeType = match?.[1] || mimeType;
-    const bytes = Buffer.from(base64, 'base64');
-    return {
-      blob: new Blob([bytes], { type: detectedMimeType }),
-      fileName: msg.mediaFileName || incomingMediaFileName({}, '', msg.mediaKind, detectedMimeType),
-      mimeType: detectedMimeType,
-      size: bytes.byteLength
-    };
-  }
-
   const channel = CHANNELS[msg.channelKey] || {};
   const headers = channel.token ? { token: channel.token } : {};
   const response = await fetch(msg.mediaUrl, { headers });
@@ -1835,7 +1557,7 @@ async function ensureWuzapiWebhook(channelKey, channel) {
   }
 
   const url = bridgeWebhookUrl(channelKey);
-  const desiredEventSets = [['All'], ['Message'], ['AutomationMessage']];
+  const desiredEventSets = [['All'], ['AutomationMessage']];
   const existingBody = await wuzapiRequest('/webhook', channel, { method: 'GET' });
   const existing = listWebhookItems(existingBody);
   const ours = existing.filter((item) => {
@@ -2097,31 +1819,19 @@ async function sendToWuzapi(payload) {
 
 async function handleIncoming(req, res, channelKey) {
   const payload = await readBody(req);
-  const messageObject = incomingMessageObject(payload);
-  const mediaCandidate = nestedMediaMessage(messageObject);
   log('info', 'webhook received', {
     channelKey,
     eventName: incomingEventName(payload),
-    fromMe: truthyFlag(firstPath(payload, [
+    fromMe: Boolean(firstPath(payload, [
       'event.Info.IsFromMe',
-      'event.Info.MessageSource.IsFromMe',
-      'event.Info.messageSource.isFromMe',
       'data.Info.IsFromMe',
-      'data.Info.MessageSource.IsFromMe',
-      'data.Info.messageSource.isFromMe',
       'Data.Info.IsFromMe',
-      'Data.Info.MessageSource.IsFromMe',
-      'Data.Info.messageSource.isFromMe',
       'Info.IsFromMe',
-      'Info.MessageSource.IsFromMe',
-      'Info.messageSource.isFromMe',
       'event.key.fromMe',
       'data.key.fromMe',
       'key.fromMe',
       'fromMe'
-    ])),
-    hasMediaMessage: Boolean(mediaCandidate),
-    mediaKind: mediaCandidate ? mediaMessageKind(messageObject) || incomingMediaKind(messageObject, payload) : undefined
+    ]))
   });
   const msg = await parseIncoming(payload, channelKey);
   if (msg.ignore) {
@@ -2145,8 +1855,8 @@ async function handleIncoming(req, res, channelKey) {
       phone: msg.phone,
       conversationId,
       contactId: contactCtx.contactId,
-      media: Boolean(msg.mediaUrl || msg.mediaDownload),
-      fromMe: truthyFlag(msg.fromMe),
+      media: Boolean(msg.mediaUrl),
+      fromMe: Boolean(msg.fromMe),
       eventName: msg.eventName,
       messageType: msg.messageType
     });
@@ -2186,13 +1896,11 @@ const server = http.createServer(async (req, res) => {
     if (SECRET && url.searchParams.get('secret') !== SECRET) return sendJson(res, 401, { ok: false, error: 'unauthorized' });
 
     if (req.method === 'GET' && url.pathname === '/fzap/debug') {
-      const requestedLimit = Number(url.searchParams.get('limit') || 150);
-      const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 150, 1), 500);
       return sendJson(res, 200, {
         ok: true,
         version: VERSION,
         channels: Object.keys(CHANNELS),
-        recent: recentDiagnostics.slice(-limit)
+        recent: recentDiagnostics.slice(-80)
       });
     }
 

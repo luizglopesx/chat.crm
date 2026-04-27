@@ -30,7 +30,7 @@ A bridge também aplica automaticamente uma etiqueta visível na conversa (`cana
 - `POST /fzap/webhook/canal1?secret=...` — webhook da Wuzapi do canal1
 - `POST /fzap/webhook/canal2?secret=...` — webhook da Wuzapi do canal2
 - `POST /fzap/outgoing?secret=...`        — webhook do EvoCRM (mensagens saindo pro WhatsApp)
-- `GET  /fzap/debug?secret=...&limit=150` — diagnóstico recente da bridge, protegido pelo mesmo secret
+- `GET  /fzap/debug?secret=...`           — diagnóstico recente da bridge, protegido pelo mesmo secret
 - `GET  /fzap/debug-summary`              — resumo público sanitizado dos últimos eventos, sem conteúdo de mensagem/token e com telefone mascarado
 
 ## Variáveis de ambiente (stack `fzap_evo_bridge`)
@@ -53,7 +53,7 @@ Opcionais (têm default):
 - `EVO_INBOX_NAME` (default `FZAP WhatsApp`) — fallback se `EVO_INBOX_IDENTIFIER` não bater
 - `EVO_INBOX_ID` — número; se definido, pula a auto-descoberta
 - `WUZAPI_BASE_URL` (default `https://wuzapi.senhorcolchao.com`)
-- `WUZAPI_WEBHOOK_SYNC_INTERVAL_MS` (default `300000`) — intervalo para revalidar os webhooks `All`, `Message` e `AutomationMessage`; use `0` para desativar
+- `WUZAPI_WEBHOOK_SYNC_INTERVAL_MS` (default `300000`) — intervalo para revalidar os webhooks `All` e `AutomationMessage`; use `0` para desativar
 - `PORT` (default `3000`)
 
 Os segredos reais ficam só no Portainer, nunca no Git.
@@ -99,15 +99,11 @@ Feita uma vez, nunca mais precisa:
 
 Cada startup loga a `VERSION` (ex: `version=bridge-2026-04-25-strip-internal-attrs`). Em caso de erro, o log traz a URL e método que falharam (`EvoCRM 404 GET /api/v1/...`), além de snippets do payload FZAP quando a extração de telefone falha.
 
-O endpoint `GET /fzap/debug?secret=...` devolve os últimos eventos da bridge em memória (default 150; aceite `limit` de 1 a 500) — útil pra diagnosticar sem precisar abrir o container no Portainer.
+O endpoint `GET /fzap/debug?secret=...` devolve os últimos ~80 eventos da bridge em memória (entradas, saídas, ignorados, erros) — útil pra diagnosticar sem precisar abrir o container no Portainer.
 
 O endpoint `GET /fzap/debug-summary` devolve só um resumo sanitizado dos últimos eventos, útil para confirmar rapidamente se webhooks recentes chegaram na bridge sem expor conteúdo ou segredos.
 
 Nas criações de mensagem no EvoCRM, o log `message created` agora traz `messageId`, `messageType`, `fromMe`, `status`, `responseKeys` e `responseSnippet`, então dá pra ver exatamente o que o EvoCRM devolveu se a mensagem não aparecer na UI.
-
-Eventos de sincronização multi-device da Wuzapi/FZAP (`AppState`, `HistorySync`, `OfflineSync*`) ignorados por não conterem mensagem extraível incluem `payloadSnippet` no debug protegido para diagnosticar envios feitos por outro dispositivo, como WhatsApp Web/extensões.
-
-Quando mensagens recebidas ou `fromMe` externas chegam com metadados WhatsApp de mídia (`imageMessage`, `videoMessage`, `documentMessage` ou `audioMessage`) mas sem `mediaUrl` público, a bridge chama o endpoint de download da Wuzapi correspondente e anexa o arquivo resultante no EvoCRM. O log `webhook received` agora marca `hasMediaMessage`/`mediaKind`, e `media metadata incomplete` mostra quais campos de download faltaram quando a Wuzapi envia mídia em formato incompleto.
 
 ## Escopo atual
 
@@ -117,9 +113,9 @@ Quando mensagens recebidas ou `fromMe` externas chegam com metadados WhatsApp de
   - Para `fromMe=true`, a bridge extrai o telefone apenas do destinatário (`Chat`/`RecipientAlt`), nunca do `Sender` (que é o próprio canal); se vier só LID, tenta `reverseLid` em todos os candidatos antes de desistir.
   - Para evitar loop quando o EvoCRM dispara o webhook outgoing dessa mensagem sintética, a bridge mantém os `echoId` das mensagens fromMe externas em memória (`recentExternalFromMeIds`, TTL 10min) e cruza com `source_id`/`echo_id`/`id` do webhook outgoing.
   - Para aparecer ao vivo no frontend, mensagens `fromMe` externas vão para o EvoCRM com o ID da Wuzapi em `source_id`, mas sem `echo_id`; o frontend usa `echo_id` em mensagens `outgoing` como substituição de uma mensagem temporária digitada localmente.
-- Eventos `Message`/`AutomationMessage` da Wuzapi/FZAP: tratados como mensagens normais; quando ignorados, o log inclui `eventName`, `fromMe` e snippet do payload para depuração.
-- Eventos técnicos da Wuzapi/FZAP (`IdentityChange`, `ReadReceipt`, `StatusMessage`, presença/sync) são ignorados quando não carregam conteúdo de mensagem de chat; se um `StatusMessage` vier com texto/mídia/caption, a bridge tenta sincronizar normalmente.
-- Webhooks da Wuzapi/FZAP: no startup e periodicamente, a bridge cria/atualiza seus próprios webhooks `All`, `Message` e `AutomationMessage` para cada canal configurado, sem apagar webhooks de outros sistemas como o Campaign Manager. As chamadas usam apenas `token` minúsculo (e `instance` quando configurado) — duplicar para `Token` faz o `fetch` do Node concatenar os valores com vírgula e a Wuzapi rejeita por auth inválida.
+- Eventos `AutomationMessage` da Wuzapi/FZAP: tratados como mensagens normais; quando ignorados, o log inclui `eventName`, `fromMe` e snippet do payload para depuração.
+- Eventos técnicos da Wuzapi/FZAP (`IdentityChange`, `ReadReceipt`, `StatusMessage`, presença/sync) são ignorados antes da extração de telefone, porque não carregam mensagem de chat para sincronizar.
+- Webhooks da Wuzapi/FZAP: no startup e periodicamente, a bridge cria/atualiza seus próprios webhooks `All` e `AutomationMessage` para cada canal configurado, sem apagar webhooks de outros sistemas como o Campaign Manager. As chamadas usam apenas `token` minúsculo (e `instance` quando configurado) — duplicar para `Token` faz o `fetch` do Node concatenar os valores com vírgula e a Wuzapi rejeita por auth inválida.
 - Identificação visual do canal no EvoCRM: ao sincronizar uma mensagem entrante, a bridge garante a existência das etiquetas `canal 1`/`canal 2` e aplica a etiqueta correspondente na conversa sem remover outras etiquetas existentes. O EvoCRM normaliza nomes de etiquetas para minúsculas.
 - Texto sainte (EvoCRM/Agente de IA → WhatsApp): suportado via `/chat/send/text` da Wuzapi; HTML do editor rico é convertido para texto limpo antes do envio.
 - Anexos saindo do EvoCRM para WhatsApp: imagem, áudio, vídeo, documento e sticker são encaminhados para os endpoints específicos da Wuzapi quando o webhook do EvoCRM envia `attachments` com URL pública.
@@ -144,7 +140,6 @@ Quando mensagens recebidas ou `fromMe` externas chegam com metadados WhatsApp de
 - **Automação criava conversa "canal pra ele mesmo"** com erro 500 no EvoCRM — para `fromMe=true`, o loop de candidatos caía no `Sender` (número do canal) quando o `Chat` vinha em formato LID. Restringida a lista de candidatos a `recipientAltJid` e `rawChatJid`, e o fallback de LID agora itera todos antes de desistir.
 - **Mensagens da automação não apareciam na UI do CRM** mesmo com a bridge logando `message created` — o EvoCRM aceitava o POST mas o `id` voltava `undefined`. Suspeita: hook interno escondia mensagens com `content_attributes.fzap_synced_from_me`/`fzap_bridge_sync_only`. Flags removidas; dedup migrou para mapa em memória (`recentExternalFromMeIds`).
 - **Mensagens da automação só apareciam após atualizar a página** — a bridge ainda enviava `echo_id` em mensagens `fromMe` externas; o frontend interpretava `outgoing + echo_id` como eco otimista de uma mensagem local e tentava substituir um placeholder inexistente. O ID externo agora fica em `source_id`, preservando dedup/loop sem quebrar o realtime.
-- **Macros/atalhos enviados pelo WhatsApp Web não chegavam no CRM** — a bridge agora registra explicitamente o webhook `Message`, normaliza flags booleanas de `fromMe` e só ignora `StatusMessage` quando o payload não tem conteúdo de mensagem. Isso permite sincronizar envios externos como mensagens `outgoing` no CRM quando a Wuzapi entrega texto, mídia ou caption.
 - **Contatos eram criados, mas algumas conversas não apareciam** — em alguns casos o EvoCRM já tinha/esperava uma conversa para o `source_id`, mas `/contacts/{id}/conversations` não retornava e o `POST /conversations` podia falhar. A bridge agora faz fallback por `source_id` antes/depois da tentativa de criação e tenta reabrir conversas recuperadas para voltarem à aba Ativas.
 
 ### Regressões resolvidas em 2026-04-27

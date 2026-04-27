@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-27-wuzapi-session-reconnect';
+const VERSION = 'bridge-2026-04-27-whatsapp-web-from-me';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -112,6 +112,17 @@ function firstPath(obj, paths) {
   return undefined;
 }
 
+function truthyFlag(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const text = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'sim'].includes(text)) return true;
+    if (['false', '0', 'no', 'nao'].includes(text)) return false;
+  }
+  return Boolean(value);
+}
+
 function walkFind(obj, names) {
   const wanted = new Set(names.map(n => n.toLowerCase()));
   const seen = new Set();
@@ -202,20 +213,28 @@ function incomingMessageObject(payload) {
   return firstPath(payload, [
     'event.Message',
     'event.AutomationMessage',
+    'event.StatusMessage',
     'event.message',
     'event.automationMessage',
+    'event.statusMessage',
     'data.Message',
     'data.AutomationMessage',
+    'data.StatusMessage',
     'data.message',
     'data.automationMessage',
+    'data.statusMessage',
     'Data.Message',
     'Data.AutomationMessage',
+    'Data.StatusMessage',
     'Data.message',
     'Data.automationMessage',
+    'Data.statusMessage',
     'Message',
     'AutomationMessage',
+    'StatusMessage',
     'message',
-    'automationMessage'
+    'automationMessage',
+    'statusMessage'
   ]);
 }
 
@@ -450,6 +469,21 @@ function extractMessageText(message) {
     'imageMessage.caption',
     'videoMessage.caption',
     'documentMessage.caption',
+    'message.conversation',
+    'message.extendedTextMessage.text',
+    'message.imageMessage.caption',
+    'message.videoMessage.caption',
+    'message.documentMessage.caption',
+    'ephemeralMessage.message.conversation',
+    'ephemeralMessage.message.extendedTextMessage.text',
+    'ephemeralMessage.message.imageMessage.caption',
+    'ephemeralMessage.message.videoMessage.caption',
+    'ephemeralMessage.message.documentMessage.caption',
+    'viewOnceMessage.message.imageMessage.caption',
+    'viewOnceMessage.message.videoMessage.caption',
+    'viewOnceMessageV2.message.imageMessage.caption',
+    'viewOnceMessageV2.message.videoMessage.caption',
+    'documentWithCaptionMessage.message.documentMessage.caption',
     'buttonsResponseMessage.selectedDisplayText',
     'buttonsResponseMessage.selectedButtonId',
     'listResponseMessage.title',
@@ -540,6 +574,25 @@ function incomingContactText(message) {
   return [`[contato recebido] ${displayName || ''}`.trim(), vcard].filter(Boolean).join('\n');
 }
 
+function hasIncomingMessagePayload(payload, messageObject) {
+  if (messageObject && typeof messageObject === 'object') {
+    const text = extractMessageText(messageObject);
+    if (text) return true;
+    if (incomingLocationDetails(messageObject)) return true;
+    if (incomingContactText(messageObject)) return true;
+  }
+  if (extractMediaUrl(payload)) return true;
+  return Boolean(firstPath(payload, [
+    'event.body',
+    'data.body',
+    'Data.body',
+    'body',
+    'text',
+    'content',
+    'caption'
+  ]) || walkFind(payload, ['conversation', 'text', 'body', 'caption']));
+}
+
 async function reverseLid(channelKey, lid) {
   const channel = CHANNELS[channelKey] || {};
   if (!channel.token || !lid) return '';
@@ -564,11 +617,12 @@ async function reverseLid(channelKey, lid) {
 
 async function parseIncoming(payload, channelKey) {
   const eventName = incomingEventName(payload);
-  if (isTechnicalIncomingEvent(eventName)) {
+  const messageObject = incomingMessageObject(payload);
+  if (isTechnicalIncomingEvent(eventName) && !hasIncomingMessagePayload(payload, messageObject)) {
     return { ignore: true, reason: 'technical_event', debug: { eventName } };
   }
 
-  const fromMe = Boolean(firstPath(payload, [
+  const fromMe = truthyFlag(firstPath(payload, [
     'event.Info.IsFromMe',
     'event.Info.MessageSource.IsFromMe',
     'event.Info.messageSource.isFromMe',
@@ -667,28 +721,72 @@ async function parseIncoming(payload, channelKey) {
 
   const recipientAltJid = firstPath(payload, [
     'event.Info.RecipientAlt',
+    'event.Info.RecipientPN',
+    'event.Info.RecipientPn',
+    'event.Info.Recipient',
+    'event.Info.To',
     'event.Info.ChatAlt',
     'event.Info.MessageSource.RecipientAlt',
+    'event.Info.MessageSource.Recipient',
+    'event.Info.MessageSource.RecipientPN',
+    'event.Info.MessageSource.RecipientPn',
+    'event.Info.MessageSource.To',
     'event.Info.MessageSource.ChatAlt',
     'event.Info.messageSource.recipientAlt',
+    'event.Info.messageSource.recipient',
+    'event.Info.messageSource.recipientPn',
+    'event.Info.messageSource.to',
     'event.Info.messageSource.chatAlt',
     'data.Info.RecipientAlt',
+    'data.Info.RecipientPN',
+    'data.Info.RecipientPn',
+    'data.Info.Recipient',
+    'data.Info.To',
     'data.Info.ChatAlt',
     'data.Info.MessageSource.RecipientAlt',
+    'data.Info.MessageSource.Recipient',
+    'data.Info.MessageSource.RecipientPN',
+    'data.Info.MessageSource.RecipientPn',
+    'data.Info.MessageSource.To',
     'data.Info.MessageSource.ChatAlt',
     'data.Info.messageSource.recipientAlt',
+    'data.Info.messageSource.recipient',
+    'data.Info.messageSource.recipientPn',
+    'data.Info.messageSource.to',
     'data.Info.messageSource.chatAlt',
     'Data.Info.RecipientAlt',
+    'Data.Info.RecipientPN',
+    'Data.Info.RecipientPn',
+    'Data.Info.Recipient',
+    'Data.Info.To',
     'Data.Info.ChatAlt',
     'Data.Info.MessageSource.RecipientAlt',
+    'Data.Info.MessageSource.Recipient',
+    'Data.Info.MessageSource.RecipientPN',
+    'Data.Info.MessageSource.RecipientPn',
+    'Data.Info.MessageSource.To',
     'Data.Info.MessageSource.ChatAlt',
     'Data.Info.messageSource.recipientAlt',
+    'Data.Info.messageSource.recipient',
+    'Data.Info.messageSource.recipientPn',
+    'Data.Info.messageSource.to',
     'Data.Info.messageSource.chatAlt',
     'Info.RecipientAlt',
+    'Info.RecipientPN',
+    'Info.RecipientPn',
+    'Info.Recipient',
+    'Info.To',
     'Info.ChatAlt',
     'Info.MessageSource.RecipientAlt',
+    'Info.MessageSource.Recipient',
+    'Info.MessageSource.RecipientPN',
+    'Info.MessageSource.RecipientPn',
+    'Info.MessageSource.To',
     'Info.MessageSource.ChatAlt',
     'Info.messageSource.recipientAlt',
+    'Info.messageSource.recipient',
+    'Info.messageSource.recipientPn',
+    'Info.messageSource.to',
     'Info.messageSource.chatAlt'
   ]);
 
@@ -759,7 +857,6 @@ async function parseIncoming(payload, channelKey) {
     return { ignore: true, reason: 'no_phone' };
   }
 
-  const messageObject = incomingMessageObject(payload);
   const rawText = extractMessageText(messageObject) || firstPath(payload, [
     'event.Message.conversation',
     'event.AutomationMessage.conversation',
@@ -1557,7 +1654,7 @@ async function ensureWuzapiWebhook(channelKey, channel) {
   }
 
   const url = bridgeWebhookUrl(channelKey);
-  const desiredEventSets = [['All'], ['AutomationMessage']];
+  const desiredEventSets = [['All'], ['Message'], ['AutomationMessage']];
   const existingBody = await wuzapiRequest('/webhook', channel, { method: 'GET' });
   const existing = listWebhookItems(existingBody);
   const ours = existing.filter((item) => {
@@ -1822,11 +1919,19 @@ async function handleIncoming(req, res, channelKey) {
   log('info', 'webhook received', {
     channelKey,
     eventName: incomingEventName(payload),
-    fromMe: Boolean(firstPath(payload, [
+    fromMe: truthyFlag(firstPath(payload, [
       'event.Info.IsFromMe',
+      'event.Info.MessageSource.IsFromMe',
+      'event.Info.messageSource.isFromMe',
       'data.Info.IsFromMe',
+      'data.Info.MessageSource.IsFromMe',
+      'data.Info.messageSource.isFromMe',
       'Data.Info.IsFromMe',
+      'Data.Info.MessageSource.IsFromMe',
+      'Data.Info.messageSource.isFromMe',
       'Info.IsFromMe',
+      'Info.MessageSource.IsFromMe',
+      'Info.messageSource.isFromMe',
       'event.key.fromMe',
       'data.key.fromMe',
       'key.fromMe',
@@ -1856,7 +1961,7 @@ async function handleIncoming(req, res, channelKey) {
       conversationId,
       contactId: contactCtx.contactId,
       media: Boolean(msg.mediaUrl),
-      fromMe: Boolean(msg.fromMe),
+      fromMe: truthyFlag(msg.fromMe),
       eventName: msg.eventName,
       messageType: msg.messageType
     });

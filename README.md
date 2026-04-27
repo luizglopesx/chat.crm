@@ -105,6 +105,8 @@ O endpoint `GET /fzap/debug-summary` devolve só um resumo sanitizado dos últim
 
 Nas criações de mensagem no EvoCRM, o log `message created` agora traz `messageId`, `messageType`, `fromMe`, `status`, `responseKeys` e `responseSnippet`, então dá pra ver exatamente o que o EvoCRM devolveu se a mensagem não aparecer na UI.
 
+Eventos de sincronização multi-device da Wuzapi/FZAP (`AppState`, `HistorySync`, `OfflineSync*`) ignorados por não conterem mensagem extraível incluem `payloadSnippet` no debug protegido para diagnosticar envios feitos por outro dispositivo, como WhatsApp Web/extensões.
+
 ## Escopo atual
 
 - Texto entrante (WhatsApp → EvoCRM): suportado via Agent API.

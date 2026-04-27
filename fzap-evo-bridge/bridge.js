@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-27-whatsapp-web-from-me';
+const VERSION = 'bridge-2026-04-27-sync-diagnostics';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -248,6 +248,16 @@ function isTechnicalIncomingEvent(eventName) {
     'chatpresence',
     'historysync',
     'appstate'
+  ].includes(String(eventName || '').toLowerCase());
+}
+
+function isSyncDiagnosticEvent(eventName) {
+  return [
+    'appstate',
+    'appstatesynccomplete',
+    'historysync',
+    'offlinesynccompleted',
+    'offlinesyncpreview'
   ].includes(String(eventName || '').toLowerCase());
 }
 
@@ -619,7 +629,14 @@ async function parseIncoming(payload, channelKey) {
   const eventName = incomingEventName(payload);
   const messageObject = incomingMessageObject(payload);
   if (isTechnicalIncomingEvent(eventName) && !hasIncomingMessagePayload(payload, messageObject)) {
-    return { ignore: true, reason: 'technical_event', debug: { eventName } };
+    return {
+      ignore: true,
+      reason: 'technical_event',
+      debug: {
+        eventName,
+        ...(isSyncDiagnosticEvent(eventName) ? { payloadSnippet: summarizePayload(payload) } : {})
+      }
+    };
   }
 
   const fromMe = truthyFlag(firstPath(payload, [
@@ -680,6 +697,7 @@ async function parseIncoming(payload, channelKey) {
     'phone'
   ]);
   const chatJidText = normalizeJidValue(rawChatJid);
+  if (chatJidText === 'status@broadcast') return { ignore: true, reason: 'status_broadcast', debug: { eventName } };
   if (chatJidText.includes('@g.us')) return { ignore: true, reason: 'group' };
 
   const senderAltJid = firstPath(payload, [

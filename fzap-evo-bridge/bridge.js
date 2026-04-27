@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-27-channel-source-routing';
+const VERSION = 'bridge-2026-04-27-wuzapi-session-reconnect';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -1595,6 +1595,41 @@ async function ensureAllWuzapiWebhooks() {
   }
 }
 
+function isNoSessionError(err) {
+  const text = [
+    err?.message,
+    err?.body?.details,
+    err?.body?.detail,
+    err?.body?.error,
+    err?.body?.message,
+    typeof err?.body === 'string' ? err.body : ''
+  ].filter(Boolean).join(' ').toLowerCase();
+  return text.includes('no session');
+}
+
+async function reconnectWuzapiSession(channelKey, channel) {
+  try {
+    const response = await wuzapiRequest('/session/connect', channel, {
+      method: 'POST',
+      body: { immediate: false }
+    });
+    log('info', 'wuzapi session reconnect attempted', {
+      channelKey,
+      status: response?.__status,
+      responseSnippet: summarizePayload(response)
+    });
+    return response;
+  } catch (err) {
+    log('warn', 'wuzapi session reconnect failed', {
+      channelKey,
+      status: err.status,
+      body: err.body,
+      error: err.message
+    });
+    throw err;
+  }
+}
+
 async function sendTextToWuzapi(channelKey, channel, phone, content, id) {
   if (!content) return { ignored: 'empty_text' };
   markBridgeOutboundId(id);
@@ -1629,6 +1664,17 @@ async function sendTextToWuzapi(channelKey, channel, phone, content, id) {
       return { type: 'text', retriedWithoutCheck: true, response };
     } catch (retryErr) {
       retryErr.channelKey = channelKey;
+      if (isNoSessionError(retryErr)) {
+        await reconnectWuzapiSession(channelKey, channel);
+        const response = await wuzapiFetch('/chat/send/text', channel, {
+          phone,
+          body: content,
+          id,
+          check: false,
+          linkPreview: false
+        });
+        return { type: 'text', reconnectedSession: true, response };
+      }
       throw retryErr;
     }
   }

@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-25-channel-labels';
+const VERSION = 'bridge-2026-04-27-wuzapi-text-retry';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -1598,14 +1598,27 @@ async function ensureAllWuzapiWebhooks() {
 async function sendTextToWuzapi(channel, phone, content, id) {
   if (!content) return { ignored: 'empty_text' };
   markBridgeOutboundId(id);
-  const response = await wuzapiFetch('/chat/send/text', channel, {
+  const payload = {
     phone,
     body: content,
     id,
     check: true,
     linkPreview: true
-  });
-  return { type: 'text', response };
+  };
+
+  try {
+    const response = await wuzapiFetch('/chat/send/text', channel, payload);
+    return { type: 'text', response };
+  } catch (err) {
+    if (!err.status || err.status < 500) throw err;
+    log('warn', 'wuzapi text send failed with check, retrying without check', {
+      status: err.status,
+      body: err.body,
+      phone: maskPhone(phone)
+    });
+    const response = await wuzapiFetch('/chat/send/text', channel, { phone, body: content, id });
+    return { type: 'text', retriedWithoutCheck: true, response };
+  }
 }
 
 async function sendLocationToWuzapi(channel, phone, location, id) {

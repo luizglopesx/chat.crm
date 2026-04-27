@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-27-wuzapi-text-retry';
+const VERSION = 'bridge-2026-04-27-channel-source-routing';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -1595,7 +1595,7 @@ async function ensureAllWuzapiWebhooks() {
   }
 }
 
-async function sendTextToWuzapi(channel, phone, content, id) {
+async function sendTextToWuzapi(channelKey, channel, phone, content, id) {
   if (!content) return { ignored: 'empty_text' };
   markBridgeOutboundId(id);
   const payload = {
@@ -1610,14 +1610,27 @@ async function sendTextToWuzapi(channel, phone, content, id) {
     const response = await wuzapiFetch('/chat/send/text', channel, payload);
     return { type: 'text', response };
   } catch (err) {
+    err.channelKey = channelKey;
     if (!err.status || err.status < 500) throw err;
     log('warn', 'wuzapi text send failed with check, retrying without check', {
+      channelKey,
       status: err.status,
       body: err.body,
       phone: maskPhone(phone)
     });
-    const response = await wuzapiFetch('/chat/send/text', channel, { phone, body: content, id });
-    return { type: 'text', retriedWithoutCheck: true, response };
+    try {
+      const response = await wuzapiFetch('/chat/send/text', channel, {
+        phone,
+        body: content,
+        id,
+        check: false,
+        linkPreview: false
+      });
+      return { type: 'text', retriedWithoutCheck: true, response };
+    } catch (retryErr) {
+      retryErr.channelKey = channelKey;
+      throw retryErr;
+    }
   }
 }
 
@@ -1719,12 +1732,22 @@ async function sendToWuzapi(payload) {
   }
 
   const sourceId = payload?.conversation?.contact_inbox?.source_id || payload.source_id || '';
-  const channelKey = payload?.conversation?.custom_attributes?.fzap_channel_key || channelFromSource(sourceId);
+  const sourceChannelKey = channelFromSource(sourceId);
+  const customChannelKey = payload?.conversation?.custom_attributes?.fzap_channel_key || '';
+  const channelKey = sourceChannelKey || customChannelKey;
   const channel = CHANNELS[channelKey];
   if (!channel?.token) throw new Error(`missing channel token for ${channelKey || 'unknown'}`);
 
   const phone = phoneFromSource(sourceId, payload.sender || payload?.conversation?.meta?.sender);
   if (!phone) throw new Error('missing destination phone');
+  log('info', 'outgoing route resolved', {
+    channelKey,
+    sourceChannelKey,
+    customChannelKey,
+    sourceId,
+    phone: maskPhone(phone),
+    messageId: payload.id
+  });
 
   const content = normalizeOutgoingContent(payload.content);
   const location = outgoingLocation(payload);
@@ -1741,11 +1764,11 @@ async function sendToWuzapi(payload) {
       results.push(await sendAttachmentToWuzapi(channel, phone, attachment, index === 0 ? content : '', `${baseWuzapiId}${index}`));
     }
   } else if (!location && !contact && content) {
-    results.push(await sendTextToWuzapi(channel, phone, content, baseWuzapiId));
+    results.push(await sendTextToWuzapi(channelKey, channel, phone, content, baseWuzapiId));
   }
 
   if (!results.length) return { ignored: 'empty_content' };
-  return { sent: true, channel: channel.label || channelKey, phone, results };
+  return { sent: true, channel: channel.label || channelKey, channelKey, phone, results };
 }
 
 async function handleIncoming(req, res, channelKey) {
@@ -1841,7 +1864,7 @@ const server = http.createServer(async (req, res) => {
 
     sendJson(res, 404, { ok: false, error: 'not found' });
   } catch (err) {
-    log('error', err.message, { status: err.status, body: err.body, stack: err.stack });
+    log('error', err.message, { channelKey: err.channelKey, status: err.status, body: err.body, stack: err.stack });
     sendJson(res, 500, { ok: false, error: err.message, details: err.body });
   }
 });

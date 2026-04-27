@@ -145,3 +145,4 @@ Nas criações de mensagem no EvoCRM, o log `message created` agora traz `messag
 ### Regressões resolvidas em 2026-04-27
 
 - **Mensagens digitadas no CRM ficavam com "Status indisponível" e não chegavam ao cliente** — a Wuzapi retornava `500` no `/chat/send/text` quando o envio era feito com `check/linkPreview`. A bridge agora tenta primeiro com validação; se a Wuzapi falhar com erro 5xx, reenvia o mesmo texto sem `check/linkPreview`, preservando o mesmo ID para reduzir risco de duplicidade.
+- **Saída em conversas multi-canal podia escolher canal por atributo antigo da conversa** — no outgoing, a bridge agora prioriza o canal extraído de `conversation.contact_inbox.source_id` (`telefone@canal1/2`), que é o vínculo real daquela conversa, e só usa `custom_attributes.fzap_channel_key` como fallback. O debug também registra `outgoing route resolved` com canal e telefone mascarado.

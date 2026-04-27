@@ -107,6 +107,8 @@ Nas criações de mensagem no EvoCRM, o log `message created` agora traz `messag
 
 Eventos de sincronização multi-device da Wuzapi/FZAP (`AppState`, `HistorySync`, `OfflineSync*`) ignorados por não conterem mensagem extraível incluem `payloadSnippet` no debug protegido para diagnosticar envios feitos por outro dispositivo, como WhatsApp Web/extensões.
 
+Quando mensagens recebidas ou `fromMe` externas chegam com metadados WhatsApp de mídia (`imageMessage`, `videoMessage`, `documentMessage` ou `audioMessage`) mas sem `mediaUrl` público, a bridge chama o endpoint de download da Wuzapi correspondente e anexa o arquivo resultante no EvoCRM.
+
 ## Escopo atual
 
 - Texto entrante (WhatsApp → EvoCRM): suportado via Agent API.

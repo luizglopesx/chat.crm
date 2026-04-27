@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-27-sync-diagnostics';
+const VERSION = 'bridge-2026-04-27-from-me-media-download';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -513,10 +513,82 @@ function extractMediaUrl(payload) {
     'Data.mediaUrl',
     'event.mediaUrl',
     'mediaUrl',
-    'url',
     'downloadUrl',
     'fileUrl'
-  ]) || walkFind(payload, ['mediaUrl', 'downloadUrl', 'fileUrl', 'url']);
+  ]) || walkFind(payload, ['mediaUrl', 'downloadUrl', 'fileUrl']);
+}
+
+function nestedMediaMessage(message) {
+  if (!message || typeof message !== 'object') return null;
+  return firstPath(message, [
+    'imageMessage',
+    'videoMessage',
+    'documentMessage',
+    'audioMessage',
+    'stickerMessage',
+    'message.imageMessage',
+    'message.videoMessage',
+    'message.documentMessage',
+    'message.audioMessage',
+    'message.stickerMessage',
+    'ephemeralMessage.message.imageMessage',
+    'ephemeralMessage.message.videoMessage',
+    'ephemeralMessage.message.documentMessage',
+    'ephemeralMessage.message.audioMessage',
+    'ephemeralMessage.message.stickerMessage',
+    'viewOnceMessage.message.imageMessage',
+    'viewOnceMessage.message.videoMessage',
+    'viewOnceMessageV2.message.imageMessage',
+    'viewOnceMessageV2.message.videoMessage',
+    'documentWithCaptionMessage.message.documentMessage'
+  ]);
+}
+
+function mediaMessageKind(message) {
+  if (!message || typeof message !== 'object') return '';
+  if (firstPath(message, ['imageMessage', 'message.imageMessage', 'ephemeralMessage.message.imageMessage', 'viewOnceMessage.message.imageMessage', 'viewOnceMessageV2.message.imageMessage'])) return 'imagem';
+  if (firstPath(message, ['videoMessage', 'message.videoMessage', 'ephemeralMessage.message.videoMessage', 'viewOnceMessage.message.videoMessage', 'viewOnceMessageV2.message.videoMessage'])) return 'video';
+  if (firstPath(message, ['documentMessage', 'message.documentMessage', 'ephemeralMessage.message.documentMessage', 'documentWithCaptionMessage.message.documentMessage'])) return 'documento';
+  if (firstPath(message, ['audioMessage', 'message.audioMessage', 'ephemeralMessage.message.audioMessage'])) return 'audio';
+  if (firstPath(message, ['stickerMessage', 'message.stickerMessage', 'ephemeralMessage.message.stickerMessage'])) return 'sticker';
+  return '';
+}
+
+function mediaDownloadEndpoint(mediaKind) {
+  if (mediaKind === 'imagem') return '/chat/downloadimage';
+  if (mediaKind === 'video') return '/chat/downloadvideo';
+  if (mediaKind === 'documento') return '/chat/downloaddocument';
+  if (mediaKind === 'audio') return '/chat/downloadaudio';
+  return '';
+}
+
+function extractMediaDownload(message, payload) {
+  const media = nestedMediaMessage(message);
+  if (!media || typeof media !== 'object') return null;
+
+  const mediaKind = mediaMessageKind(message) || incomingMediaKind(message, payload);
+  const endpoint = mediaDownloadEndpoint(mediaKind);
+  if (!endpoint) return null;
+
+  const request = compactObject({
+    url: firstPath(media, ['url', 'URL']),
+    directPath: firstPath(media, ['directPath', 'DirectPath']),
+    mediaKey: firstPath(media, ['mediaKey', 'MediaKey']),
+    mimeType: firstPath(media, ['mimetype', 'mimeType', 'MimeType']),
+    fileEncSha256: firstPath(media, ['fileEncSha256', 'fileEncSHA256', 'FileEncSHA256']),
+    fileSha256: firstPath(media, ['fileSha256', 'fileSHA256', 'FileSHA256']),
+    fileLength: firstPath(media, ['fileLength', 'FileLength']),
+    generateLink: false
+  });
+  if (!request.url || !request.mediaKey || !request.mimeType || !request.fileSha256 || !request.fileLength) return null;
+
+  return {
+    endpoint,
+    request,
+    mediaKind,
+    mimeType: request.mimeType,
+    fileName: incomingMediaFileName(payload, '', mediaKind, request.mimeType)
+  };
 }
 
 function incomingMediaKind(message, payload) {
@@ -902,7 +974,8 @@ async function parseIncoming(payload, channelKey) {
   const text = rawText && typeof rawText === 'object' ? extractMessageText(rawText) : rawText;
 
   const mediaUrl = extractMediaUrl(payload);
-  const mediaKind = mediaUrl ? incomingMediaKind(messageObject, payload) : '';
+  const mediaDownload = mediaUrl ? null : extractMediaDownload(messageObject, payload);
+  const mediaKind = mediaUrl ? incomingMediaKind(messageObject, payload) : (mediaDownload?.mediaKind || '');
   const location = incomingLocationDetails(messageObject);
   const locationText = incomingLocationText(messageObject);
   const contactText = incomingContactText(messageObject);
@@ -910,7 +983,7 @@ async function parseIncoming(payload, channelKey) {
   let content = String(text || '').trim();
   if (!content && locationText) content = locationText;
   if (!content && contactText) content = contactText;
-  if (!content && mediaUrl) content = `[${mediaKind} recebida]`;
+  if (!content && (mediaUrl || mediaDownload)) content = `[${mediaKind || 'midia'} recebida]`;
   if (!content) {
     return {
       ignore: true,
@@ -960,8 +1033,9 @@ async function parseIncoming(payload, channelKey) {
     eventName,
     messageType: fromMe ? 'outgoing' : 'incoming',
     mediaUrl,
+    mediaDownload,
     mediaKind,
-    mediaFileName: mediaUrl ? incomingMediaFileName(payload, mediaUrl, mediaKind) : '',
+    mediaFileName: mediaUrl ? incomingMediaFileName(payload, mediaUrl, mediaKind) : (mediaDownload?.fileName || ''),
     location,
     echoId,
     channelKey,
@@ -1400,7 +1474,7 @@ async function addIncomingMessage(msg, conversationId) {
     }
   }
 
-  if (msg.mediaUrl) {
+  if (msg.mediaUrl || msg.mediaDownload) {
     try {
       return await addIncomingMediaMessage(msg, conversationId);
     } catch (err) {
@@ -1408,11 +1482,12 @@ async function addIncomingMessage(msg, conversationId) {
         conversationId,
         echoId: msg.echoId,
         mediaUrl: msg.mediaUrl,
+        mediaDownloadEndpoint: msg.mediaDownload?.endpoint,
         status: err.status,
         body: err.body,
         error: err.message
       });
-      msg.content = `${msg.content}\n${msg.mediaUrl}`.trim();
+      msg.content = `${msg.content}\n${msg.mediaUrl || ''}`.trim();
     }
   }
 
@@ -1541,6 +1616,60 @@ async function addIncomingLocationMessage(msg, conversationId) {
 }
 
 async function downloadIncomingMedia(msg) {
+  if (msg.mediaDownload) {
+    const channel = CHANNELS[msg.channelKey] || {};
+    const body = await wuzapiRequest(msg.mediaDownload.endpoint, channel, {
+      method: 'POST',
+      body: msg.mediaDownload.request
+    });
+    const dataUrl = firstPath(body, [
+      'data.data',
+      'data.base64',
+      'data.media',
+      'data.url',
+      'data.downloadUrl',
+      'data.fileUrl',
+      'downloadUrl',
+      'fileUrl',
+      'url'
+    ]);
+    const mimeType = firstPath(body, ['data.mimeType', 'mimeType']) || msg.mediaDownload.mimeType || 'application/octet-stream';
+    if (!dataUrl) {
+      const err = new Error('media download response missing data');
+      err.body = body;
+      throw err;
+    }
+    if (/^https?:\/\//i.test(String(dataUrl))) {
+      const response = await fetch(dataUrl);
+      if (!response.ok) {
+        const err = new Error(`media download link ${response.status}`);
+        err.status = response.status;
+        err.body = { url: dataUrl };
+        throw err;
+      }
+      const responseMimeType = response.headers.get('content-type') || mimeType;
+      const bytes = await response.arrayBuffer();
+      return {
+        blob: new Blob([bytes], { type: responseMimeType }),
+        fileName: msg.mediaFileName || incomingMediaFileName({}, dataUrl, msg.mediaKind, responseMimeType),
+        mimeType: responseMimeType,
+        size: bytes.byteLength
+      };
+    }
+
+    const dataUrlText = String(dataUrl);
+    const match = dataUrlText.match(/^data:([^;,]+)?;base64,(.+)$/);
+    const base64 = match ? match[2] : dataUrlText;
+    const detectedMimeType = match?.[1] || mimeType;
+    const bytes = Buffer.from(base64, 'base64');
+    return {
+      blob: new Blob([bytes], { type: detectedMimeType }),
+      fileName: msg.mediaFileName || incomingMediaFileName({}, '', msg.mediaKind, detectedMimeType),
+      mimeType: detectedMimeType,
+      size: bytes.byteLength
+    };
+  }
+
   const channel = CHANNELS[msg.channelKey] || {};
   const headers = channel.token ? { token: channel.token } : {};
   const response = await fetch(msg.mediaUrl, { headers });
@@ -1978,7 +2107,7 @@ async function handleIncoming(req, res, channelKey) {
       phone: msg.phone,
       conversationId,
       contactId: contactCtx.contactId,
-      media: Boolean(msg.mediaUrl),
+      media: Boolean(msg.mediaUrl || msg.mediaDownload),
       fromMe: truthyFlag(msg.fromMe),
       eventName: msg.eventName,
       messageType: msg.messageType

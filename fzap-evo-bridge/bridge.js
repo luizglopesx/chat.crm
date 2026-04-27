@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-27-from-me-media-download';
+const VERSION = 'bridge-2026-04-27-media-diagnostics';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -23,7 +23,7 @@ const labelCache = new Map();
 function log(level, message, data = {}) {
   const entry = { ts: new Date().toISOString(), level, message, ...data };
   recentDiagnostics.push(entry);
-  while (recentDiagnostics.length > 200) recentDiagnostics.shift();
+  while (recentDiagnostics.length > 500) recentDiagnostics.shift();
   console.log(JSON.stringify(entry));
 }
 
@@ -51,18 +51,22 @@ function publicDiagnosticEntry(entry) {
     contactId: entry.contactId,
     phone: maskPhone(entry.phone),
     sourceId: entry.sourceId ? String(entry.sourceId).replace(/^\d+/, match => maskPhone(match) || match) : undefined,
-    media: entry.media
+    media: entry.media,
+    hasMediaMessage: entry.hasMediaMessage,
+    mediaKind: entry.mediaKind,
+    missingMediaFields: entry.missingMediaFields,
+    mediaKeys: entry.mediaKeys
   });
 }
 
 function publicDiagnosticsSummary() {
-  const recent = recentDiagnostics.slice(-80).map(publicDiagnosticEntry);
+  const recent = recentDiagnostics.slice(-200).map(publicDiagnosticEntry);
   const counts = recent.reduce((acc, entry) => {
     const key = entry.message || 'unknown';
     acc[key] = (acc[key] || 0) + 1;
     return acc;
   }, {});
-  return { counts, recent: recent.slice(-30) };
+  return { counts, recent: recent.slice(-50) };
 }
 
 function sendJson(res, status, body) {
@@ -591,6 +595,23 @@ function extractMediaDownload(message, payload) {
   };
 }
 
+function missingMediaDownloadFields(media) {
+  if (!media || typeof media !== 'object') return [];
+  const checks = {
+    url: firstPath(media, ['url', 'URL']),
+    mediaKey: firstPath(media, ['mediaKey', 'MediaKey']),
+    mimeType: firstPath(media, ['mimetype', 'mimeType', 'MimeType']),
+    fileSha256: firstPath(media, ['fileSha256', 'fileSHA256', 'FileSHA256']),
+    fileLength: firstPath(media, ['fileLength', 'FileLength'])
+  };
+  return Object.entries(checks).filter(([, value]) => !value).map(([key]) => key);
+}
+
+function publicMediaKeys(media) {
+  if (!media || typeof media !== 'object') return [];
+  return Object.keys(media).filter(key => !/thumbnail|jpeg|mediaKey|sha256|url|directPath/i.test(key)).slice(0, 20);
+}
+
 function incomingMediaKind(message, payload) {
   const keys = message && typeof message === 'object' ? Object.keys(message) : [];
   const byKey = keys.find(key => /Message$/i.test(key));
@@ -976,6 +997,19 @@ async function parseIncoming(payload, channelKey) {
   const mediaUrl = extractMediaUrl(payload);
   const mediaDownload = mediaUrl ? null : extractMediaDownload(messageObject, payload);
   const mediaKind = mediaUrl ? incomingMediaKind(messageObject, payload) : (mediaDownload?.mediaKind || '');
+  const mediaCandidate = nestedMediaMessage(messageObject);
+  if (mediaCandidate && !mediaUrl && !mediaDownload) {
+    log('warn', 'media metadata incomplete', {
+      channelKey,
+      eventName,
+      fromMe,
+      mediaKind: mediaMessageKind(messageObject) || incomingMediaKind(messageObject, payload),
+      mediaKeys: publicMediaKeys(mediaCandidate),
+      missingMediaFields: missingMediaDownloadFields(mediaCandidate),
+      echoCandidate: firstPath(payload, ['event.Info.ID', 'data.Info.ID', 'Data.Info.ID', 'Info.ID', 'id']),
+      payloadSnippet: summarizePayload(payload)
+    });
+  }
   const location = incomingLocationDetails(messageObject);
   const locationText = incomingLocationText(messageObject);
   const contactText = incomingContactText(messageObject);
@@ -2063,6 +2097,8 @@ async function sendToWuzapi(payload) {
 
 async function handleIncoming(req, res, channelKey) {
   const payload = await readBody(req);
+  const messageObject = incomingMessageObject(payload);
+  const mediaCandidate = nestedMediaMessage(messageObject);
   log('info', 'webhook received', {
     channelKey,
     eventName: incomingEventName(payload),
@@ -2083,7 +2119,9 @@ async function handleIncoming(req, res, channelKey) {
       'data.key.fromMe',
       'key.fromMe',
       'fromMe'
-    ]))
+    ])),
+    hasMediaMessage: Boolean(mediaCandidate),
+    mediaKind: mediaCandidate ? mediaMessageKind(messageObject) || incomingMediaKind(messageObject, payload) : undefined
   });
   const msg = await parseIncoming(payload, channelKey);
   if (msg.ignore) {
@@ -2148,11 +2186,13 @@ const server = http.createServer(async (req, res) => {
     if (SECRET && url.searchParams.get('secret') !== SECRET) return sendJson(res, 401, { ok: false, error: 'unauthorized' });
 
     if (req.method === 'GET' && url.pathname === '/fzap/debug') {
+      const requestedLimit = Number(url.searchParams.get('limit') || 150);
+      const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 150, 1), 500);
       return sendJson(res, 200, {
         ok: true,
         version: VERSION,
         channels: Object.keys(CHANNELS),
-        recent: recentDiagnostics.slice(-80)
+        recent: recentDiagnostics.slice(-limit)
       });
     }
 

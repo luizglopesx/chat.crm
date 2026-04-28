@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-27-wuzapi-session-reconnect';
+const VERSION = 'bridge-2026-04-28-promote-contact-name';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -102,6 +102,45 @@ function compactObject(value) {
 
 function normalizeLabelTitle(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function normalizeContactName(value) {
+  return String(value || '')
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function contactNameFromPayload(payload, fromMe, phone) {
+  const pushName = fromMe ? '' : firstPath(payload, [
+    'event.Info.PushName',
+    'data.Info.PushName',
+    'Data.Info.PushName',
+    'Info.PushName',
+    'pushName',
+    'name',
+    'notifyName'
+  ]);
+  return String(pushName || `WhatsApp ${phone}`);
+}
+
+function isGeneratedContactName(name, phone) {
+  const normalized = normalizeContactName(name);
+  if (!normalized) return true;
+  if (normalized === normalizeContactName(`WhatsApp ${phone}`)) return true;
+  return normalized.startsWith('whatsapp ') && digitsOnly(normalized) === phone;
+}
+
+function isKnownOwnDisplayName(name) {
+  return ['senhor colchao', 'sr colchao'].includes(normalizeContactName(name));
+}
+
+function shouldPromoteContactName(existingName, nextName, phone) {
+  if (!nextName || normalizeContactName(existingName) === normalizeContactName(nextName)) return false;
+  if (isGeneratedContactName(nextName, phone)) return false;
+  return isGeneratedContactName(existingName, phone) || isKnownOwnDisplayName(existingName);
 }
 
 function firstPath(obj, paths) {
@@ -809,15 +848,7 @@ async function parseIncoming(payload, channelKey) {
     };
   }
 
-  const pushName = firstPath(payload, [
-    'event.Info.PushName',
-    'data.Info.PushName',
-    'Data.Info.PushName',
-    'Info.PushName',
-    'pushName',
-    'name',
-    'notifyName'
-  ]) || `WhatsApp ${phone}`;
+  const contactName = contactNameFromPayload(payload, fromMe, phone);
 
   const channel = CHANNELS[channelKey] || {};
   const sourceId = `${phone}@${channelKey}`;
@@ -839,7 +870,7 @@ async function parseIncoming(payload, channelKey) {
   return {
     phone,
     sourceId,
-    name: String(pushName),
+    name: contactName,
     content,
     fromMe,
     eventName,
@@ -961,10 +992,10 @@ async function findContactBySourceId(sourceId, phone) {
     : [];
   for (const contact of items) {
     const ci = (contact.contact_inboxes || []).find(c => c.source_id === sourceId);
-    if (ci) return { contactId: contact.id, contactInboxId: ci.id, sourceId: ci.source_id };
+    if (ci) return { contactId: contact.id, contactInboxId: ci.id, sourceId: ci.source_id, name: contact.name };
   }
   const byPhone = items.find(c => digitsOnly(c.phone_number) === phone);
-  if (byPhone) return { contactId: byPhone.id, contactInboxId: null, sourceId: null };
+  if (byPhone) return { contactId: byPhone.id, contactInboxId: null, sourceId: null, name: byPhone.name };
   return null;
 }
 
@@ -1094,13 +1125,43 @@ async function applyChannelLabel(conversationId, msg) {
   }
 }
 
+async function promoteContactNameIfNeeded(existing, msg) {
+  if (!existing?.contactId || msg.fromMe) return;
+  if (!shouldPromoteContactName(existing.name, msg.name, msg.phone)) return;
+
+  try {
+    await evoFetch(`/api/v1/contacts/${existing.contactId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: msg.name })
+    });
+    log('info', 'contact name promoted', {
+      contactId: existing.contactId,
+      previousName: existing.name,
+      nextName: msg.name,
+      phone: maskPhone(msg.phone)
+    });
+    existing.name = msg.name;
+  } catch (err) {
+    log('warn', 'contact name promote failed', {
+      contactId: existing.contactId,
+      previousName: existing.name,
+      nextName: msg.name,
+      status: err.status,
+      body: err.body,
+      error: err.message
+    });
+  }
+}
+
 async function ensureContact(msg, inboxId) {
   const existing = await findContactBySourceId(msg.sourceId, msg.phone);
   if (existing?.contactInboxId) {
+    await promoteContactNameIfNeeded(existing, msg);
     log('info', 'contact found', { contactId: existing.contactId, contactInboxId: existing.contactInboxId });
     return existing;
   }
   if (existing?.contactId) {
+    await promoteContactNameIfNeeded(existing, msg);
     const ci = await createContactInbox(existing.contactId, msg.sourceId, inboxId);
     log('info', 'contact inbox created for existing contact', { contactId: existing.contactId, ...ci });
     return { contactId: existing.contactId, ...ci };

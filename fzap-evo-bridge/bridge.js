@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-29-contact-inbox-rebind';
+const VERSION = 'bridge-2026-04-29-contact-render';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -173,6 +173,16 @@ function walkFind(obj, names) {
 
 function digitsOnly(value) {
   return String(value || '').replace(/\D/g, '');
+}
+
+function formatPhoneBR(value) {
+  const d = digitsOnly(value);
+  if (!d) return '';
+  if (d.length === 13 && d.startsWith('55')) return `+55 (${d.slice(2, 4)}) ${d.slice(4, 9)}-${d.slice(9)}`;
+  if (d.length === 12 && d.startsWith('55')) return `+55 (${d.slice(2, 4)}) ${d.slice(4, 8)}-${d.slice(8)}`;
+  if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+  if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+  return `+${d}`;
 }
 
 function summarizePayload(payload) {
@@ -598,10 +608,11 @@ function incomingLocationDetails(message) {
 function incomingContactText(message) {
   const contact = incomingContactDetails(message);
   if (!contact) return '';
+  const name = contact.displayName || 'Contato';
   return [
-    `[contato recebido] ${contact.displayName || 'Contato'}`.trim(),
-    contact.primaryPhone ? `Telefone: ${contact.primaryPhone}` : '',
-    contact.waLink ? `WhatsApp: ${contact.waLink}` : ''
+    `👤 **${name}**`,
+    contact.primaryPhone ? `📞 ${formatPhoneBR(contact.primaryPhone)}` : '',
+    contact.waLink || ''
   ].filter(Boolean).join('\n');
 }
 

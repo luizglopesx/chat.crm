@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-29-contact-render';
+const VERSION = 'bridge-2026-04-29-location-render';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -584,7 +584,12 @@ function incomingMediaFileName(payload, mediaUrl, mediaKind, mimeType = '') {
 function incomingLocationText(message) {
   const location = incomingLocationDetails(message);
   if (!location) return '';
-  return [`[localizacao recebida]`, location.name, location.address].filter(Boolean).join('\n');
+  return [
+    `📍 **Localização recebida**`,
+    location.name || '',
+    location.address || '',
+    location.url || ''
+  ].filter(Boolean).join('\n');
 }
 
 function incomingLocationDetails(message) {

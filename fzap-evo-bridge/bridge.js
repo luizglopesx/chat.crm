@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-29-multi-inbox-resolver';
+const VERSION = 'bridge-2026-04-29-public-identifier-fallback';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -954,6 +954,7 @@ async function evoFetchForm(path, form) {
 }
 
 const inboxIdCache = new Map();
+const inboxMetaCache = new Map();
 const inboxResolutionPromises = new Map();
 
 const DEFAULT_CHANNEL_INBOXES = {
@@ -1001,6 +1002,7 @@ async function resolveInboxId(channelKey) {
       const cfg = channelInboxConfig(channelKey);
       if (cfg.inboxId) {
         inboxIdCache.set(cacheKey, cfg.inboxId);
+        inboxMetaCache.set(cacheKey, { id: cfg.inboxId, publicIdentifier: cfg.inboxIdentifier, name: cfg.inboxName });
         log('info', 'inbox resolved from config', { channelKey, id: cfg.inboxId });
         return cfg.inboxId;
       }
@@ -1016,12 +1018,27 @@ async function resolveInboxId(channelKey) {
         throw new Error(`inbox not found for channel "${channelKey || 'default'}" (identifier="${cfg.inboxIdentifier}" name="${cfg.inboxName}")`);
       }
       inboxIdCache.set(cacheKey, match.id);
-      log('info', 'inbox resolved', { channelKey, id: match.id, name: match.name, identifier: match.inbox_identifier });
+      inboxMetaCache.set(cacheKey, {
+        id: match.id,
+        publicIdentifier: match.inbox_identifier || match.identifier || match.channel?.identifier || cfg.inboxIdentifier,
+        name: match.name || match.display_name || cfg.inboxName
+      });
+      log('info', 'inbox resolved', {
+        channelKey,
+        id: match.id,
+        name: match.name,
+        identifier: match.inbox_identifier,
+        publicIdentifier: inboxMetaCache.get(cacheKey)?.publicIdentifier
+      });
       return match.id;
     })();
     inboxResolutionPromises.set(cacheKey, promise);
   }
   return inboxResolutionPromises.get(cacheKey);
+}
+
+function resolvedInboxMeta(channelKey) {
+  return inboxMetaCache.get(channelKey || '__default__') || null;
 }
 
 async function findContactBySourceId(sourceId, phone) {
@@ -1337,7 +1354,7 @@ async function getOrCreateConversation(msg, ctx, inboxId) {
       return recovered;
     }
 
-    const publicCreated = await createConversationViaPublicApi(msg, err);
+    const publicCreated = await createConversationViaPublicApi(msg, err, inboxId);
     if (publicCreated) {
       const recoveredAfterPublicCreate = await findConversationBySourceId(msg.sourceId, inboxId)
         || await findConversationForContact(ctx.contactId, inboxId);
@@ -1372,10 +1389,12 @@ async function findConversationForContact(contactId, inboxId) {
   return existing.id;
 }
 
-async function createConversationViaPublicApi(msg, originalErr) {
+async function createConversationViaPublicApi(msg, originalErr, inboxId) {
   try {
     const cfg = channelInboxConfig(msg.channelKey);
-    const path = `/public/api/v1/inboxes/${encodeURIComponent(cfg.inboxIdentifier)}/contacts/${encodeURIComponent(msg.sourceId)}/conversations`;
+    const meta = resolvedInboxMeta(msg.channelKey);
+    const publicIdentifier = meta?.publicIdentifier || cfg.inboxIdentifier;
+    const path = `/public/api/v1/inboxes/${encodeURIComponent(publicIdentifier)}/contacts/${encodeURIComponent(msg.sourceId)}/conversations`;
     await evoFetch(path, {
       method: 'POST',
       body: JSON.stringify({
@@ -1386,7 +1405,11 @@ async function createConversationViaPublicApi(msg, originalErr) {
         }
       })
     });
-    log('info', 'public conversation create fallback attempted', { sourceId: msg.sourceId });
+    log('info', 'public conversation create fallback attempted', {
+      sourceId: msg.sourceId,
+      inboxId,
+      publicIdentifier
+    });
     return true;
   } catch (err) {
     log('warn', 'public conversation create fallback failed', {

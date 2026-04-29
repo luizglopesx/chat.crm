@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-29-evo-outgoing-webhook';
+const VERSION = 'bridge-2026-04-29-public-attachment-urls';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -326,6 +326,10 @@ function absoluteUrl(value) {
   const text = String(value || '').trim();
   if (!text) return '';
   if (text.startsWith(EVO_BASE_URL)) return `${EVO_PUBLIC_BASE_URL}${text.slice(EVO_BASE_URL.length)}`;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//i.test(text)) {
+    const url = new URL(text);
+    return `${EVO_PUBLIC_BASE_URL}${url.pathname}${url.search}${url.hash}`;
+  }
   if (/^https?:\/\//i.test(text)) return text;
   if (text.startsWith('/')) return `${EVO_PUBLIC_BASE_URL}${text}`;
   return text;

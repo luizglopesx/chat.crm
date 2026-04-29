@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-29-public-attachment-urls';
+const VERSION = 'bridge-2026-04-29-evo-message-status';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -315,6 +315,25 @@ function isBridgeSyncedOutgoing(payload) {
 function outgoingWuzapiId(payload, suffix = '') {
   const seed = String(payload.id || payload.echo_id || Date.now()).replace(/\W/g, '').slice(-24);
   return `EVOCRM${seed}${suffix}`;
+}
+
+function outgoingConversationId(payload) {
+  return String(firstPath(payload, [
+    'conversation.uuid',
+    'conversation.display_id',
+    'conversation.id',
+    'conversation_id',
+    'conversationId'
+  ]) || '').trim();
+}
+
+function outgoingMessageId(payload) {
+  return String(firstPath(payload, [
+    'id',
+    'message.id',
+    'message_id',
+    'messageId'
+  ]) || '').trim();
 }
 
 function asArray(value) {
@@ -955,6 +974,36 @@ async function evoFetchForm(path, form) {
     throw err;
   }
   return body;
+}
+
+async function updateOutgoingEvoMessageStatus(payload, status, externalError = '') {
+  const conversationId = outgoingConversationId(payload);
+  const messageId = outgoingMessageId(payload);
+  if (!conversationId || !messageId) {
+    log('warn', 'evo message status update skipped', {
+      reason: 'missing_ids',
+      conversationId,
+      messageId,
+      status
+    });
+    return { skipped: 'missing_ids' };
+  }
+
+  const body = compactObject({
+    status,
+    external_error: externalError ? String(externalError).slice(0, 500) : ''
+  });
+  const result = await evoFetch(`/api/v1/conversations/${conversationId}/messages/${messageId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body)
+  });
+  log('info', 'evo message status updated', {
+    conversationId,
+    messageId,
+    status,
+    responseStatus: result?.__status
+  });
+  return result;
 }
 
 const inboxIdCache = new Map();
@@ -2044,7 +2093,20 @@ async function sendToWuzapi(payload) {
   }
 
   if (!results.length) return { ignored: 'empty_content' };
-  return { sent: true, channel: channel.label || channelKey, channelKey, phone, results };
+  let evoStatus;
+  try {
+    evoStatus = await updateOutgoingEvoMessageStatus(payload, 'sent');
+  } catch (err) {
+    log('warn', 'evo message status update failed', {
+      status: err.status,
+      body: err.body,
+      error: err.message,
+      messageId: outgoingMessageId(payload),
+      conversationId: outgoingConversationId(payload)
+    });
+  }
+
+  return { sent: true, channel: channel.label || channelKey, channelKey, phone, results, evoStatus };
 }
 
 async function handleIncoming(req, res, channelKey) {

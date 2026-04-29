@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-29-evo-message-status';
+const VERSION = 'bridge-2026-04-29-rich-location-contact';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -574,7 +574,7 @@ function incomingMediaFileName(payload, mediaUrl, mediaKind, mimeType = '') {
 function incomingLocationText(message) {
   const location = incomingLocationDetails(message);
   if (!location) return '';
-  return [`[localizacao recebida]`, location.name, location.address, location.url].filter(Boolean).join('\n');
+  return [`[localizacao recebida]`, location.name, location.address].filter(Boolean).join('\n');
 }
 
 function incomingLocationDetails(message) {
@@ -596,10 +596,64 @@ function incomingLocationDetails(message) {
 }
 
 function incomingContactText(message) {
-  const displayName = firstPath(message, ['contactMessage.displayName', 'contactsArrayMessage.contacts.0.displayName']);
-  const vcard = firstPath(message, ['contactMessage.vcard', 'contactsArrayMessage.contacts.0.vcard']);
-  if (!displayName && !vcard) return '';
-  return [`[contato recebido] ${displayName || ''}`.trim(), vcard].filter(Boolean).join('\n');
+  const contact = incomingContactDetails(message);
+  if (!contact) return '';
+  return [
+    `[contato recebido] ${contact.displayName || 'Contato'}`.trim(),
+    contact.primaryPhone ? `Telefone: ${contact.primaryPhone}` : '',
+    contact.waLink ? `WhatsApp: ${contact.waLink}` : ''
+  ].filter(Boolean).join('\n');
+}
+
+function normalizeVcard(value) {
+  return String(value || '')
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\r\n/g, '\n')
+    .trim();
+}
+
+function vcardPhones(vcard) {
+  const phones = [];
+  for (const line of normalizeVcard(vcard).split('\n')) {
+    if (!/^(item\d+\.)?tel[;:]/i.test(line.trim())) continue;
+    const value = line.split(':').slice(1).join(':').trim();
+    const digits = digitsOnly(value);
+    if (digits && !phones.includes(digits)) phones.push(digits);
+  }
+  return phones;
+}
+
+function incomingContactDetails(message) {
+  const displayName = firstPath(message, [
+    'contactMessage.displayName',
+    'contactsArrayMessage.contacts.0.displayName'
+  ]);
+  const vcard = normalizeVcard(firstPath(message, [
+    'contactMessage.vcard',
+    'contactsArrayMessage.contacts.0.vcard'
+  ]));
+  if (!displayName && !vcard) return null;
+
+  const phones = vcardPhones(vcard);
+  const primaryPhone = phones[0] || '';
+  return {
+    displayName: String(displayName || '').trim(),
+    vcard,
+    phones,
+    primaryPhone,
+    waLink: primaryPhone ? `https://wa.me/${primaryPhone}` : ''
+  };
+}
+
+function safeAttachmentName(value, fallback = 'arquivo') {
+  const text = String(value || fallback)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9._-]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  return text || fallback;
 }
 
 async function reverseLid(channelKey, lid) {
@@ -852,7 +906,8 @@ async function parseIncoming(payload, channelKey) {
   const mediaKind = mediaUrl ? incomingMediaKind(messageObject, payload) : '';
   const location = incomingLocationDetails(messageObject);
   const locationText = incomingLocationText(messageObject);
-  const contactText = incomingContactText(messageObject);
+  const contact = incomingContactDetails(messageObject);
+  const contactText = contact ? incomingContactText(messageObject) : '';
 
   let content = String(text || '').trim();
   if (!content && locationText) content = locationText;
@@ -902,6 +957,7 @@ async function parseIncoming(payload, channelKey) {
     mediaKind,
     mediaFileName: mediaUrl ? incomingMediaFileName(payload, mediaUrl, mediaKind) : '',
     location,
+    contact,
     echoId,
     channelKey,
     channelLabel: channel.label || channelKey
@@ -1564,6 +1620,20 @@ async function addIncomingMessage(msg, conversationId) {
     }
   }
 
+  if (msg.contact) {
+    try {
+      return await addIncomingContactMessage(msg, conversationId);
+    } catch (err) {
+      log('warn', 'incoming contact upload failed, falling back to text', {
+        conversationId,
+        echoId: msg.echoId,
+        status: err.status,
+        body: err.body,
+        error: err.message
+      });
+    }
+  }
+
   if (msg.mediaUrl) {
     try {
       return await addIncomingMediaMessage(msg, conversationId);
@@ -1692,7 +1762,7 @@ async function addIncomingLocationMessage(msg, conversationId) {
   form.append('private', 'false');
   form.append('source_id', msg.echoId);
   if (!msg.fromMe) form.append('echo_id', msg.echoId);
-  form.append('attachments[]', new Blob([svg], { type: 'image/svg+xml' }), `localizacao-${msg.echoId || Date.now()}.svg`);
+  form.append('attachments[]', new Blob([svg], { type: 'image' }), `localizacao-${msg.echoId || Date.now()}.svg`);
 
   const result = await evoFetchForm(`/api/v1/conversations/${conversationId}/messages`, form);
   log('info', 'location message created', {
@@ -1700,6 +1770,43 @@ async function addIncomingLocationMessage(msg, conversationId) {
     messageId: result?.id,
     latitude: msg.location.latitude,
     longitude: msg.location.longitude
+  });
+  return result;
+}
+
+function contactVcard(contact) {
+  if (contact?.vcard) return contact.vcard;
+  const name = contact?.displayName || 'Contato';
+  const phone = contact?.primaryPhone || '';
+  return [
+    'BEGIN:VCARD',
+    'VERSION:3.0',
+    `FN:${name}`,
+    phone ? `TEL;TYPE=CELL:${phone}` : '',
+    'END:VCARD'
+  ].filter(Boolean).join('\n');
+}
+
+async function addIncomingContactMessage(msg, conversationId) {
+  if (msg.fromMe && msg.echoId) markExternalFromMeId(msg.echoId);
+  const contact = msg.contact || {};
+  const displayName = contact.displayName || contact.primaryPhone || 'Contato';
+  const fileName = `${safeAttachmentName(displayName, 'contato')}.vcf`;
+  const form = new FormData();
+  form.append('content', msg.content);
+  form.append('message_type', msg.messageType || 'incoming');
+  form.append('content_type', 'text');
+  form.append('private', 'false');
+  form.append('source_id', msg.echoId);
+  if (!msg.fromMe) form.append('echo_id', msg.echoId);
+  form.append('attachments[]', new Blob([contactVcard(contact)], { type: 'text/vcard' }), fileName);
+
+  const result = await evoFetchForm(`/api/v1/conversations/${conversationId}/messages`, form);
+  log('info', 'contact message created', {
+    conversationId,
+    messageId: result?.id,
+    fileName,
+    phone: contact.primaryPhone
   });
   return result;
 }

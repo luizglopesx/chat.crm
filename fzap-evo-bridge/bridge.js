@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-29-public-identifier-fallback';
+const VERSION = 'bridge-2026-04-29-evo-outgoing-webhook';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -1021,14 +1021,16 @@ async function resolveInboxId(channelKey) {
       inboxMetaCache.set(cacheKey, {
         id: match.id,
         publicIdentifier: match.inbox_identifier || match.identifier || match.channel?.identifier || cfg.inboxIdentifier,
-        name: match.name || match.display_name || cfg.inboxName
+        name: match.name || match.display_name || cfg.inboxName,
+        webhookUrl: match.webhook_url || match.channel?.webhook_url || ''
       });
       log('info', 'inbox resolved', {
         channelKey,
         id: match.id,
         name: match.name,
         identifier: match.inbox_identifier,
-        publicIdentifier: inboxMetaCache.get(cacheKey)?.publicIdentifier
+        publicIdentifier: inboxMetaCache.get(cacheKey)?.publicIdentifier,
+        webhookConfigured: Boolean(inboxMetaCache.get(cacheKey)?.webhookUrl)
       });
       return match.id;
     })();
@@ -1039,6 +1041,43 @@ async function resolveInboxId(channelKey) {
 
 function resolvedInboxMeta(channelKey) {
   return inboxMetaCache.get(channelKey || '__default__') || null;
+}
+
+async function ensureEvoApiInboxWebhook(channelKey) {
+  const inboxId = await resolveInboxId(channelKey);
+  const meta = resolvedInboxMeta(channelKey);
+  const outgoingUrl = `${BRIDGE_PUBLIC_BASE_URL}/fzap/outgoing?secret=${encodeURIComponent(SECRET)}`;
+
+  if (meta?.webhookUrl === outgoingUrl) {
+    log('info', 'evo api webhook already configured', { channelKey, inboxId });
+    return;
+  }
+
+  await evoFetch(`/api/v1/inboxes/${inboxId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      channel: {
+        webhook_url: outgoingUrl
+      }
+    })
+  });
+
+  inboxMetaCache.set(channelKey || '__default__', {
+    ...(meta || {}),
+    id: inboxId,
+    webhookUrl: outgoingUrl
+  });
+  log('info', 'evo api webhook configured', { channelKey, inboxId });
+}
+
+async function ensureAllEvoApiWebhooks() {
+  if (!SECRET) {
+    log('warn', 'evo api webhook auto config skipped', { reason: 'missing_secret' });
+    return;
+  }
+  for (const channelKey of Object.keys(CHANNELS)) {
+    await ensureEvoApiInboxWebhook(channelKey);
+  }
 }
 
 async function findContactBySourceId(sourceId, phone) {
@@ -2182,6 +2221,9 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   log('info', 'fzap evo bridge listening', { port: PORT, version: VERSION });
+  ensureAllEvoApiWebhooks().catch((err) => {
+    log('warn', 'evo api webhook auto config failed', { status: err.status, body: err.body, error: err.message, stack: err.stack });
+  });
   ensureAllWuzapiWebhooks().catch((err) => {
     log('warn', 'wuzapi webhook auto config failed', { error: err.message, stack: err.stack });
   });

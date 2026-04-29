@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-28-mirror-endpoint';
+const VERSION = 'bridge-2026-04-29-multi-inbox';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -953,32 +953,57 @@ async function evoFetchForm(path, form) {
   return body;
 }
 
-let resolvedInboxId = EVO_INBOX_ID_ENV || 0;
-let inboxResolutionPromise = null;
+const inboxIdCache = new Map();
+const inboxResolutionPromises = new Map();
 
-async function resolveInboxId() {
-  if (resolvedInboxId) return resolvedInboxId;
-  if (!inboxResolutionPromise) {
-    inboxResolutionPromise = (async () => {
+const DEFAULT_CHANNEL_INBOXES = {
+  canal1: { inboxIdentifier: 'canal-1', inboxName: 'CANAL 1' },
+  canal2: { inboxIdentifier: 'canal-2', inboxName: 'CANAL 2' }
+};
+
+function channelInboxConfig(channelKey) {
+  const channel = CHANNELS[channelKey] || {};
+  const defaults = DEFAULT_CHANNEL_INBOXES[channelKey] || {};
+  return {
+    inboxId: channel.inboxId ? Number(channel.inboxId) : (EVO_INBOX_ID_ENV || 0),
+    inboxIdentifier: channel.inboxIdentifier || defaults.inboxIdentifier || EVO_INBOX_IDENTIFIER,
+    inboxName: channel.inboxName || defaults.inboxName || EVO_INBOX_NAME
+  };
+}
+
+async function resolveInboxId(channelKey) {
+  const cacheKey = channelKey || '__default__';
+  const cached = inboxIdCache.get(cacheKey);
+  if (cached) return cached;
+
+  if (!inboxResolutionPromises.has(cacheKey)) {
+    const promise = (async () => {
+      const cfg = channelInboxConfig(channelKey);
+      if (cfg.inboxId) {
+        inboxIdCache.set(cacheKey, cfg.inboxId);
+        log('info', 'inbox resolved from config', { channelKey, id: cfg.inboxId });
+        return cfg.inboxId;
+      }
       const resp = await evoFetch('/api/v1/inboxes');
       const items = Array.isArray(resp?.payload) ? resp.payload
         : Array.isArray(resp?.data?.payload) ? resp.data.payload
         : Array.isArray(resp?.data) ? resp.data
         : Array.isArray(resp) ? resp
         : [];
-      const match = items.find(i => i?.inbox_identifier === EVO_INBOX_IDENTIFIER)
-        || items.find(i => i?.name === EVO_INBOX_NAME)
-        || items.find(i => String(i?.name || '').toLowerCase() === String(EVO_INBOX_NAME).toLowerCase());
+      const match = items.find(i => i?.inbox_identifier === cfg.inboxIdentifier)
+        || items.find(i => i?.name === cfg.inboxName)
+        || items.find(i => String(i?.name || '').toLowerCase() === String(cfg.inboxName).toLowerCase());
       if (!match?.id) {
-        inboxResolutionPromise = null;
-        throw new Error(`inbox not found (identifier="${EVO_INBOX_IDENTIFIER}" name="${EVO_INBOX_NAME}")`);
+        inboxResolutionPromises.delete(cacheKey);
+        throw new Error(`inbox not found for channel "${channelKey || 'default'}" (identifier="${cfg.inboxIdentifier}" name="${cfg.inboxName}")`);
       }
-      resolvedInboxId = match.id;
-      log('info', 'inbox resolved', { id: resolvedInboxId, name: match.name, identifier: match.inbox_identifier });
-      return resolvedInboxId;
+      inboxIdCache.set(cacheKey, match.id);
+      log('info', 'inbox resolved', { channelKey, id: match.id, name: match.name, identifier: match.inbox_identifier });
+      return match.id;
     })();
+    inboxResolutionPromises.set(cacheKey, promise);
   }
-  return inboxResolutionPromise;
+  return inboxResolutionPromises.get(cacheKey);
 }
 
 async function findContactBySourceId(sourceId, phone) {
@@ -1331,7 +1356,8 @@ async function findConversationForContact(contactId, inboxId) {
 
 async function createConversationViaPublicApi(msg, originalErr) {
   try {
-    const path = `/public/api/v1/inboxes/${encodeURIComponent(EVO_INBOX_IDENTIFIER)}/contacts/${encodeURIComponent(msg.sourceId)}/conversations`;
+    const cfg = channelInboxConfig(msg.channelKey);
+    const path = `/public/api/v1/inboxes/${encodeURIComponent(cfg.inboxIdentifier)}/contacts/${encodeURIComponent(msg.sourceId)}/conversations`;
     await evoFetch(path, {
       method: 'POST',
       body: JSON.stringify({
@@ -1965,7 +1991,7 @@ async function handleIncoming(req, res, channelKey) {
   }
 
   try {
-    const inboxId = await resolveInboxId();
+    const inboxId = await resolveInboxId(channelKey);
     const contactCtx = await ensureContact(msg, inboxId);
     const conversationId = await getOrCreateConversation(msg, contactCtx, inboxId);
     await applyChannelLabel(conversationId, msg);
@@ -2023,7 +2049,7 @@ async function handleMirror(req, res) {
     return sendJson(res, 404, { ok: false, error: 'channel_not_found', channelKey });
   }
 
-  const inboxId = await resolveInboxId();
+  const inboxId = await resolveInboxId(channelKey);
   if (!inboxId) {
     return sendJson(res, 500, { ok: false, error: 'inbox_not_resolved' });
   }

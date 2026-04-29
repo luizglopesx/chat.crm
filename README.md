@@ -6,7 +6,9 @@ Integração separada entre Wuzapi/FZAP e EvoCRM Community para manter o EvoCRM 
 
 - EvoCRM: `https://chat.senhorcolchao.com` (stack Portainer `chat_crm`)
 - Bridge: stack Portainer `fzap_evo_bridge`, exposta em `https://chat.senhorcolchao.com/fzap/...`
-- Inbox EvoCRM: `FZAP WhatsApp` (identifier `fzap_whatsapp`)
+- Inboxes EvoCRM separados por número:
+  - `CANAL 1` (identifier `canal-1`) para `551733245765`
+  - `CANAL 2` (identifier `canal-2`) para `551733233694`
 - Wuzapi/FZAP: `https://wuzapi.senhorcolchao.com`
 
 Fluxo:
@@ -18,11 +20,11 @@ EvoCRM      -> fzap_evo_bridge -> FZAP/Wuzapi -> WhatsApp
 
 ## Canais
 
-- `canal1`: numero `551733245765`
-- `canal2`: numero `551733233694`
+- `canal1`: numero `551733245765`, inbox EvoCRM `CANAL 1`
+- `canal2`: numero `551733233694`, inbox EvoCRM `CANAL 2`
 
-Ambos caem no mesmo inbox `FZAP WhatsApp`; o canal vira `custom_attributes` no contato/conversa (`fzap_channel`, `fzap_channel_key`, `fzap_phone`).
-A bridge também aplica automaticamente uma etiqueta visível na conversa (`canal 1` ou `canal 2`) para diferenciar a origem na lista do EvoCRM.
+Cada número cai em um inbox EvoCRM próprio. Isso permite configurar agentes de IA do EvoCRM por canal/inbox sem risco de um agente responder nos dois números.
+A bridge também mantém `custom_attributes` no contato/conversa quando a API do EvoCRM aceitar (`fzap_channel`, `fzap_channel_key`, `fzap_phone`) e aplica automaticamente uma etiqueta visível na conversa (`CANAL 1` ou `CANAL 2`) para diferenciar a origem na lista do EvoCRM.
 
 ## Endpoints da bridge
 
@@ -41,7 +43,7 @@ Obrigatórias:
 - `EVO_API_TOKEN` — `api_access_token` de um usuário do EvoCRM com acesso à conta
 - `FZAP_CHANNELS_JSON` — mapeamento dos canais, ex.:
   ```json
-  {"canal1":{"label":"Canal 1","token":"<wuzapi-token>"},"canal2":{"label":"Canal 2","token":"<wuzapi-token>"}}
+  {"canal1":{"label":"CANAL 1","number":"551733245765","token":"<wuzapi-token>","inboxIdentifier":"canal-1","inboxName":"CANAL 1"},"canal2":{"label":"CANAL 2","number":"551733233694","token":"<wuzapi-token>","inboxIdentifier":"canal-2","inboxName":"CANAL 2"}}
   ```
 
 Opcionais (têm default):
@@ -49,9 +51,9 @@ Opcionais (têm default):
 - `EVO_BASE_URL` (default `http://chat_crm_evo_crm:3000`) — aponta direto pro container `evo_crm` da stack `chat_crm`
 - `EVO_PUBLIC_BASE_URL` (default `https://chat.senhorcolchao.com`) — usado para transformar URLs relativas de anexos do EvoCRM em URLs HTTPS públicas para a Wuzapi
 - `BRIDGE_PUBLIC_BASE_URL` (default usa `EVO_PUBLIC_BASE_URL`) — URL pública usada para registrar automaticamente os webhooks da Wuzapi/FZAP
-- `EVO_INBOX_IDENTIFIER` (default `fzap_whatsapp`) — usado pra resolver o `inbox_id` numérico no startup
-- `EVO_INBOX_NAME` (default `FZAP WhatsApp`) — fallback se `EVO_INBOX_IDENTIFIER` não bater
-- `EVO_INBOX_ID` — número; se definido, pula a auto-descoberta
+- `EVO_INBOX_IDENTIFIER` (default `fzap_whatsapp`) — fallback global para instalações de inbox único
+- `EVO_INBOX_NAME` (default `FZAP WhatsApp`) — fallback global se `EVO_INBOX_IDENTIFIER` não bater
+- `EVO_INBOX_ID` — número; se definido, pula a auto-descoberta global. Para multi-inbox, prefira `inboxId` dentro de cada canal em `FZAP_CHANNELS_JSON`.
 - `WUZAPI_BASE_URL` (default `https://wuzapi.senhorcolchao.com`)
 - `WUZAPI_WEBHOOK_SYNC_INTERVAL_MS` (default `300000`) — intervalo para revalidar os webhooks `All` e `AutomationMessage`; use `0` para desativar
 - `PORT` (default `3000`)
@@ -64,7 +66,7 @@ A bridge usa a **API autenticada do EvoCRM** (`/api/v1/...` com header `api_acce
 
 Passos por mensagem entrante:
 
-1. `resolveInboxId()` — uma vez só, lista `/inboxes` e casa por `EVO_INBOX_IDENTIFIER` ou `EVO_INBOX_NAME`. Cacheia o ID numérico.
+1. `resolveInboxId(channelKey)` — cacheia o `inbox_id` por canal. Primeiro usa `inboxId` configurado no canal; senão lista `/inboxes` e casa por `inboxIdentifier`/`inboxName` do canal (`CANAL 1` ou `CANAL 2`). O fallback global `EVO_INBOX_IDENTIFIER`/`EVO_INBOX_NAME` existe apenas para instalações antigas de inbox único.
 2. `ensureContact(msg, inboxId)` — busca por telefone em `/contacts/search`, confere `contact_inboxes` procurando o `source_id`. Se achar contato só por telefone, cria `contact_inbox` ligando ao inbox FZAP. Se não achar nada, cria contato completo (contato + contact_inbox de uma vez).
 3. `getOrCreateConversation(msg, ctx, inboxId)` — lista `/contacts/{id}/conversations`, pega a `open` no inbox FZAP, ou cria uma em `/conversations`.
 4. `addIncomingMessage(msg, conversationId)` — `POST /conversations/{id}/messages` com `message_type: "incoming"`.

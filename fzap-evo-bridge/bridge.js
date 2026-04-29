@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-29-location-render';
+const VERSION = 'bridge-2026-04-29-render-plain-text';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -585,7 +585,7 @@ function incomingLocationText(message) {
   const location = incomingLocationDetails(message);
   if (!location) return '';
   return [
-    `📍 **Localização recebida**`,
+    `📍 Localização recebida`,
     location.name || '',
     location.address || '',
     location.url || ''
@@ -615,7 +615,7 @@ function incomingContactText(message) {
   if (!contact) return '';
   const name = contact.displayName || 'Contato';
   return [
-    `👤 **${name}**`,
+    `👤 ${name}`,
     contact.primaryPhone ? `📞 ${formatPhoneBR(contact.primaryPhone)}` : '',
     contact.waLink || ''
   ].filter(Boolean).join('\n');

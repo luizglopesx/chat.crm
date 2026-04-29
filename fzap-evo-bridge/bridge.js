@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-29-rich-location-contact';
+const VERSION = 'bridge-2026-04-29-contact-inbox-rebind';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -1189,7 +1189,7 @@ async function ensureAllEvoApiWebhooks() {
   }
 }
 
-async function findContactBySourceId(sourceId, phone) {
+async function findContactBySourceId(sourceId, phone, inboxId) {
   const q = encodeURIComponent(phone);
   const resp = await evoFetch(
     `/api/v1/contacts/search?q=${q}&include=contact_inboxes`
@@ -1198,10 +1198,30 @@ async function findContactBySourceId(sourceId, phone) {
     : Array.isArray(resp?.data?.payload) ? resp.data.payload
     : Array.isArray(resp?.data) ? resp.data
     : [];
+  let contactWithMismatchedInbox = null;
   for (const contact of items) {
-    const ci = (contact.contact_inboxes || []).find(c => c.source_id === sourceId);
-    if (ci) return { contactId: contact.id, contactInboxId: ci.id, sourceId: ci.source_id, name: contact.name };
+    const inboxes = contact.contact_inboxes || [];
+    if (inboxId) {
+      const exact = inboxes.find(c => c.source_id === sourceId && c.inbox_id === inboxId);
+      if (exact) return { contactId: contact.id, contactInboxId: exact.id, sourceId: exact.source_id, name: contact.name };
+      if (!contactWithMismatchedInbox) {
+        const sameSource = inboxes.find(c => c.source_id === sourceId);
+        if (sameSource) {
+          contactWithMismatchedInbox = { contactId: contact.id, contactInboxId: null, sourceId: null, name: contact.name };
+          log('info', 'contact source_id matched in different inbox', {
+            contactId: contact.id,
+            sourceId,
+            existingInboxId: sameSource.inbox_id,
+            expectedInboxId: inboxId
+          });
+        }
+      }
+    } else {
+      const ci = inboxes.find(c => c.source_id === sourceId);
+      if (ci) return { contactId: contact.id, contactInboxId: ci.id, sourceId: ci.source_id, name: contact.name };
+    }
   }
+  if (contactWithMismatchedInbox) return contactWithMismatchedInbox;
   const byPhone = items.find(c => digitsOnly(c.phone_number) === phone);
   if (byPhone) return { contactId: byPhone.id, contactInboxId: null, sourceId: null, name: byPhone.name };
   return null;
@@ -1421,7 +1441,7 @@ async function promoteContactNameIfNeeded(existing, msg) {
 }
 
 async function ensureContact(msg, inboxId) {
-  const existing = await findContactBySourceId(msg.sourceId, msg.phone);
+  const existing = await findContactBySourceId(msg.sourceId, msg.phone, inboxId);
   if (existing?.contactInboxId) {
     await promoteContactNameIfNeeded(existing, msg);
     log('info', 'contact found', { contactId: existing.contactId, contactInboxId: existing.contactInboxId });

@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-28-promote-contact-name';
+const VERSION = 'bridge-2026-04-28-mirror-endpoint';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -1125,6 +1125,65 @@ async function applyChannelLabel(conversationId, msg) {
   }
 }
 
+function slugifySourceLabel(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+}
+
+function sourceLabelColor() {
+  return '#9b59b6';
+}
+
+async function applySourceLabel(conversationId, slug) {
+  if (!conversationId || !slug) return;
+  try {
+    await ensureLabel(slug, sourceLabelColor());
+    const labels = [...new Set([...(await fetchConversationLabelTitles(conversationId)), slug])];
+    await evoFetch(`/api/v1/conversations/${conversationId}/labels`, {
+      method: 'POST',
+      body: JSON.stringify({ labels })
+    });
+    log('info', 'source label applied', { conversationId, label: slug });
+  } catch (err) {
+    log('warn', 'source label apply failed', {
+      conversationId,
+      label: slug,
+      status: err.status,
+      body: err.body,
+      error: err.message
+    });
+  }
+}
+
+async function setConversationCustomAttributes(conversationId, attrs) {
+  if (!conversationId || !attrs) return;
+  try {
+    await evoFetch(`/api/v1/conversations/${conversationId}/custom_attributes`, {
+      method: 'POST',
+      body: JSON.stringify({
+        custom_attributes: attrs,
+        attribute_key: Object.keys(attrs)[0]
+      })
+    });
+    log('info', 'conversation custom_attributes updated', {
+      conversationId,
+      keys: Object.keys(attrs)
+    });
+  } catch (err) {
+    log('warn', 'conversation custom_attributes update failed', {
+      conversationId,
+      status: err.status,
+      body: err.body,
+      error: err.message
+    });
+  }
+}
+
 async function promoteContactNameIfNeeded(existing, msg) {
   if (!existing?.contactId || msg.fromMe) return;
   if (!shouldPromoteContactName(existing.name, msg.name, msg.phone)) return;
@@ -1935,6 +1994,83 @@ async function handleOutgoing(req, res) {
   sendJson(res, 200, { ok: true, result });
 }
 
+const VALID_MIRROR_SOURCE_TYPES = new Set(['campaign', 'broadcast', 'follow_up', 'follow_up_playbook']);
+
+async function handleMirror(req, res) {
+  const payload = await readBody(req);
+  const channelKey = String(payload?.channelKey || '').trim();
+  const phone = digitsOnly(payload?.phone);
+  const source = String(payload?.source || '').trim();
+  const sourceType = String(payload?.sourceType || '').trim();
+  const sourceId = String(payload?.sourceId || '').trim();
+  const sourceLabel = String(payload?.sourceLabel || '').trim();
+
+  const missing = [];
+  if (!channelKey) missing.push('channelKey');
+  if (!phone) missing.push('phone');
+  if (!source) missing.push('source');
+  if (!sourceType) missing.push('sourceType');
+  if (!sourceId) missing.push('sourceId');
+  if (!sourceLabel) missing.push('sourceLabel');
+  if (missing.length) {
+    return sendJson(res, 400, { ok: false, error: 'invalid_payload', missing });
+  }
+  if (!VALID_MIRROR_SOURCE_TYPES.has(sourceType)) {
+    return sendJson(res, 400, { ok: false, error: 'invalid_source_type', sourceType });
+  }
+  const channel = CHANNELS[channelKey];
+  if (!channel) {
+    return sendJson(res, 404, { ok: false, error: 'channel_not_found', channelKey });
+  }
+
+  const inboxId = await resolveInboxId();
+  if (!inboxId) {
+    return sendJson(res, 500, { ok: false, error: 'inbox_not_resolved' });
+  }
+
+  const msg = {
+    phone,
+    sourceId: `${phone}@${channelKey}`,
+    name: `WhatsApp ${phone}`,
+    fromMe: true,
+    channelKey,
+    channelLabel: channel.label || channelKey
+  };
+
+  const ctx = await ensureContact(msg, inboxId);
+  const conversationId = await getOrCreateConversation(msg, ctx, inboxId);
+  await applyChannelLabel(conversationId, msg);
+
+  const slug = slugifySourceLabel(sourceLabel);
+  await applySourceLabel(conversationId, slug);
+
+  const attrs = {
+    last_campaign_source: source,
+    last_campaign_type: sourceType,
+    last_campaign_id: sourceId,
+    last_campaign_label: sourceLabel,
+    last_campaign_at: new Date().toISOString()
+  };
+  await setConversationCustomAttributes(conversationId, attrs);
+
+  log('info', 'mirror enriched', {
+    conversationId,
+    contactId: ctx.contactId,
+    channelKey,
+    sourceType,
+    sourceId,
+    label: slug,
+    phone: maskPhone(phone)
+  });
+
+  sendJson(res, 200, {
+    ok: true,
+    conversationId,
+    contactId: ctx.contactId,
+    labelApplied: slug
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
@@ -1968,6 +2104,7 @@ const server = http.createServer(async (req, res) => {
     const incomingMatch = url.pathname.match(/^\/fzap\/webhook\/([^/]+)$/);
     if (req.method === 'POST' && incomingMatch) return await handleIncoming(req, res, incomingMatch[1]);
     if (req.method === 'POST' && url.pathname === '/fzap/outgoing') return await handleOutgoing(req, res);
+    if (req.method === 'POST' && url.pathname === '/fzap/mirror') return await handleMirror(req, res);
 
     sendJson(res, 404, { ok: false, error: 'not found' });
   } catch (err) {

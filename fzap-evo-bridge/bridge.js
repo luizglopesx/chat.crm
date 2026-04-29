@@ -1,6 +1,6 @@
 const http = require('http');
 
-const VERSION = 'bridge-2026-04-29-multi-inbox';
+const VERSION = 'bridge-2026-04-29-multi-inbox-resolver';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -971,6 +971,26 @@ function channelInboxConfig(channelKey) {
   };
 }
 
+function findInboxForChannel(items, cfg) {
+  const exact = value => String(value || '');
+  const norm = value => exact(value).trim().toLowerCase();
+  const identifier = exact(cfg.inboxIdentifier);
+  const name = exact(cfg.inboxName);
+  const normalizedIdentifier = norm(identifier);
+  const normalizedName = norm(name);
+
+  return items.find(i => exact(i?.inbox_identifier) === identifier)
+    || items.find(i => exact(i?.identifier) === identifier)
+    || items.find(i => exact(i?.channel_id) === identifier)
+    || items.find(i => exact(i?.name) === identifier)
+    || items.find(i => exact(i?.name) === name)
+    || items.find(i => norm(i?.name) === normalizedName)
+    || items.find(i => norm(i?.display_name) === normalizedName)
+    || items.find(i => norm(i?.displayName) === normalizedName)
+    || items.find(i => norm(i?.channel?.name) === normalizedIdentifier)
+    || items.find(i => norm(i?.channel?.name) === normalizedName);
+}
+
 async function resolveInboxId(channelKey) {
   const cacheKey = channelKey || '__default__';
   const cached = inboxIdCache.get(cacheKey);
@@ -990,9 +1010,7 @@ async function resolveInboxId(channelKey) {
         : Array.isArray(resp?.data) ? resp.data
         : Array.isArray(resp) ? resp
         : [];
-      const match = items.find(i => i?.inbox_identifier === cfg.inboxIdentifier)
-        || items.find(i => i?.name === cfg.inboxName)
-        || items.find(i => String(i?.name || '').toLowerCase() === String(cfg.inboxName).toLowerCase());
+      const match = findInboxForChannel(items, cfg);
       if (!match?.id) {
         inboxResolutionPromises.delete(cacheKey);
         throw new Error(`inbox not found for channel "${channelKey || 'default'}" (identifier="${cfg.inboxIdentifier}" name="${cfg.inboxName}")`);

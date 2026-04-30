@@ -1,6 +1,7 @@
 const http = require('http');
+const { Resvg } = require('@resvg/resvg-js');
 
-const VERSION = 'bridge-2026-04-29-render-plain-text';
+const VERSION = 'bridge-2026-04-29-location-png';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -1791,6 +1792,7 @@ async function buildLocationMapSvg(location) {
 async function addIncomingLocationMessage(msg, conversationId) {
   if (msg.fromMe && msg.echoId) markExternalFromMeId(msg.echoId);
   const svg = await buildLocationMapSvg(msg.location);
+  const png = new Resvg(svg, { fitTo: { mode: 'width', value: 768 } }).render().asPng();
   const form = new FormData();
   form.append('content', msg.content);
   form.append('message_type', msg.messageType || 'incoming');
@@ -1798,7 +1800,7 @@ async function addIncomingLocationMessage(msg, conversationId) {
   form.append('private', 'false');
   form.append('source_id', msg.echoId);
   if (!msg.fromMe) form.append('echo_id', msg.echoId);
-  form.append('attachments[]', new Blob([svg], { type: 'image' }), `localizacao-${msg.echoId || Date.now()}.svg`);
+  form.append('attachments[]', new Blob([png], { type: 'image/png' }), `localizacao-${msg.echoId || Date.now()}.png`);
 
   const result = await evoFetchForm(`/api/v1/conversations/${conversationId}/messages`, form);
   log('info', 'location message created', {

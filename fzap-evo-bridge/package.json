@@ -1,0 +1,9 @@
+{
+  "name": "fzap-evo-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "main": "bridge.js",
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2"
+  }
+}

@@ -1,7 +1,7 @@
 const http = require('http');
 const { Resvg } = require('@resvg/resvg-js');
 
-const VERSION = 'bridge-2026-04-29-location-png';
+const VERSION = 'bridge-2026-04-29-evo-label-sync';
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.WEBHOOK_SECRET || '';
 const EVO_BASE_URL = (process.env.EVO_BASE_URL || 'http://chat_crm_evo_crm:3000').replace(/\/$/, '');
@@ -1405,6 +1405,19 @@ async function applySourceLabel(conversationId, slug) {
   }
 }
 
+async function applyArbitraryLabel(conversationId, label, color = '#9b59b6') {
+  const title = normalizeLabelTitle(label);
+  if (!conversationId || !title) return '';
+
+  await ensureLabel(title, color);
+  const labels = [...new Set([...(await fetchConversationLabelTitles(conversationId)), title])];
+  await evoFetch(`/api/v1/conversations/${conversationId}/labels`, {
+    method: 'POST',
+    body: JSON.stringify({ labels })
+  });
+  return title;
+}
+
 async function setConversationCustomAttributes(conversationId, attrs) {
   if (!conversationId || !attrs) return;
   try {
@@ -1609,8 +1622,9 @@ async function createConversationViaPublicApi(msg, originalErr, inboxId) {
   }
 }
 
-async function findConversationBySourceId(sourceId, inboxId) {
+async function findConversationBySourceId(sourceId, inboxId, options = {}) {
   if (!sourceId) return '';
+  const shouldEnsureOpen = options.ensureOpen !== false;
   const q = encodeURIComponent(sourceId);
   const list = await evoFetch(`/api/v1/conversations?status=all&source_id=${q}&per_page=100`)
     .catch(err => { if (err.status === 404) return { payload: [] }; throw err; });
@@ -1619,7 +1633,7 @@ async function findConversationBySourceId(sourceId, inboxId) {
     || items.find(c => c.inbox_id === inboxId);
   if (!existing?.id) return '';
   log('info', 'conversation found by source_id', { id: existing.id, status: existing.status, sourceId });
-  await ensureConversationOpen(existing.id, existing.status);
+  if (shouldEnsureOpen) await ensureConversationOpen(existing.id, existing.status);
   return existing.id;
 }
 
@@ -2388,6 +2402,100 @@ async function handleMirror(req, res) {
   });
 }
 
+async function handleApplyLabel(req, res) {
+  const payload = await readBody(req);
+  const channelKey = String(payload?.channelKey || '').trim();
+  const phone = digitsOnly(payload?.phone);
+  const label = String(payload?.label || '').trim();
+
+  const missing = [];
+  if (!channelKey) missing.push('channelKey');
+  if (!phone) missing.push('phone');
+  if (!label) missing.push('label');
+  if (missing.length) {
+    return sendJson(res, 400, { ok: false, error: 'invalid_payload', missing });
+  }
+
+  const channel = CHANNELS[channelKey];
+  if (!channel) {
+    return sendJson(res, 404, { ok: false, error: 'channel_not_found', channelKey });
+  }
+
+  const inboxId = await resolveInboxId(channelKey);
+  if (!inboxId) {
+    return sendJson(res, 500, { ok: false, error: 'inbox_not_resolved' });
+  }
+
+  const sourceId = `${phone}@${channelKey}`;
+  log('info', 'apply label received', { channelKey, phone: maskPhone(phone), label });
+  const conversationId = await findConversationBySourceId(sourceId, inboxId, { ensureOpen: false });
+  if (!conversationId) {
+    return sendJson(res, 404, { ok: false, error: 'conversation_not_found', sourceId });
+  }
+
+  const appliedLabel = await applyArbitraryLabel(conversationId, label, '#9b59b6');
+  log('info', 'apply label applied', { conversationId, channelKey, label: appliedLabel, phone: maskPhone(phone) });
+
+  sendJson(res, 200, {
+    ok: true,
+    conversationId,
+    labelApplied: appliedLabel
+  });
+}
+
+async function handleCloseConversation(req, res) {
+  const payload = await readBody(req);
+  const channelKey = String(payload?.channelKey || '').trim();
+  const phone = digitsOnly(payload?.phone);
+  const status = String(payload?.status || 'resolved').trim();
+
+  const missing = [];
+  if (!channelKey) missing.push('channelKey');
+  if (!phone) missing.push('phone');
+  if (missing.length) {
+    return sendJson(res, 400, { ok: false, error: 'invalid_payload', missing });
+  }
+
+  if (!['resolved', 'pending'].includes(status)) {
+    return sendJson(res, 400, { ok: false, error: 'invalid_status', status });
+  }
+
+  const channel = CHANNELS[channelKey];
+  if (!channel) {
+    return sendJson(res, 404, { ok: false, error: 'channel_not_found', channelKey });
+  }
+
+  const inboxId = await resolveInboxId(channelKey);
+  if (!inboxId) {
+    return sendJson(res, 500, { ok: false, error: 'inbox_not_resolved' });
+  }
+
+  const sourceId = `${phone}@${channelKey}`;
+  log('info', 'close conversation received', { channelKey, phone: maskPhone(phone), status });
+  const conversationId = await findConversationBySourceId(sourceId, inboxId, { ensureOpen: false });
+  if (!conversationId) {
+    return sendJson(res, 404, { ok: false, error: 'conversation_not_found', sourceId });
+  }
+
+  const resp = await evoFetch(`/api/v1/conversations/${conversationId}/toggle_status`, {
+    method: 'POST',
+    body: JSON.stringify({ status })
+  });
+  log('info', 'close conversation applied', {
+    conversationId,
+    channelKey,
+    status,
+    responseStatus: resp?.__status,
+    phone: maskPhone(phone)
+  });
+
+  sendJson(res, 200, {
+    ok: true,
+    conversationId,
+    status
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
@@ -2422,6 +2530,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && incomingMatch) return await handleIncoming(req, res, incomingMatch[1]);
     if (req.method === 'POST' && url.pathname === '/fzap/outgoing') return await handleOutgoing(req, res);
     if (req.method === 'POST' && url.pathname === '/fzap/mirror') return await handleMirror(req, res);
+    if (req.method === 'POST' && url.pathname === '/fzap/apply-label') return await handleApplyLabel(req, res);
+    if (req.method === 'POST' && url.pathname === '/fzap/close-conversation') return await handleCloseConversation(req, res);
 
     sendJson(res, 404, { ok: false, error: 'not found' });
   } catch (err) {
